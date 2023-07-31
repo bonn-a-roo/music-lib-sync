@@ -9,7 +9,10 @@ from utils import configutils
 
 class LibrarySyncSource(abc.ABC):
     @abc.abstractmethod
-    def synchronize(self):
+    def sync_songs(self):
+        pass
+
+    def sync_playlists(self):
         pass
 
 
@@ -59,32 +62,39 @@ class SpotifyLibrary(LibrarySyncSource):
 
         return results
 
-    def synchronize(self):
+    def sync_songs(self):
         downloader = SpotifyDownloader()
         download_path = configutils.get_download_path()
-        # download_path = ask_download_path()
 
         my_songs = self.get_saved_tracks()
-        # my_songs = get_all_saved_songs_stub()
-        my_playlists = self.get_playlists()
 
-        downloaded_files = set(os.listdir(download_path + "/my_songs"))
+        my_songs_dir = os.path.join(download_path, "my_songs")
+        if not os.path.exists(my_songs_dir):
+            os.makedirs(my_songs_dir)
+
+        downloaded_files = set(os.listdir(my_songs_dir))
         songs_to_download = [song.desc_filename() for song in my_songs]
         songs_to_download = set(songs_to_download) - downloaded_files
         songs_to_download = list(songs_to_download)
-
-        my_songs = [song for song in my_songs if song.desc_filename() in songs_to_download]
         # TODO: (Still gets many songs that are already downloaded: ej. with combined artists)
+        my_songs_to_download = [song for song in my_songs if song.desc_filename() in songs_to_download]
 
-        # TODO: (Playlists songs should be checked individually before avoiding the whole playlist)
+        downloader.download(my_songs_to_download, download_path, num_threads=16)
+
+    def sync_playlists(self):
+        downloader = SpotifyDownloader()
+        download_path = configutils.get_download_path()
+
         #playlists_to_download = [playlist.name for playlist in my_playlists]
         #playlists_to_download = set(playlists_to_download) - downloaded_files
         #playlists_to_download = list(playlists_to_download)
 
         #my_playlists = [playlist for playlist in my_playlists if playlist.name in playlists_to_download]
 
-        downloader.download(my_songs, download_path, num_threads=16)
-        downloader.download(my_playlists, download_path, num_threads=16)
+        my_playlists = self.get_playlists()
+
+        # TODO: (Playlists songs should be checked individually before avoiding the whole playlist)
+        downloader.download(my_playlists, download_path, num_threads=1)
 
 # class AppleMusicLibrary(LibrarySyncSource):
 #    def __init__(self, developer_token):
