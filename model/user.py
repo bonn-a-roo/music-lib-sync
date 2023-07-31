@@ -1,7 +1,7 @@
 import spotipy
 from spotipy import SpotifyOAuth
 
-from model.playlist import Playlist
+from model.library import SpotifyLibrary
 from model.song import Song
 
 
@@ -19,45 +19,22 @@ class User:
 
     def __init__(self, scope='user-library-read'):
         self.auth = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
+        self.library = SpotifyLibrary(self.auth)
 
-    def get_all_saved_songs(self, limit_step=50):
-        tracks = []
-        songs = []
-        for offset in range(0, 10000000, limit_step):
-            response = self.auth.current_user_saved_tracks(
-                limit=limit_step,
-                offset=offset,
-            )
+    def sync_music_library(self):
+        return self.library.sync_library_locally()
 
-            if len(response['items']) == 0:
-                break
-            tracks.extend(response['items'])
-            print(offset)
+    def get_raw_info(self):
+        return self.auth.current_user()
 
-        for idx, item in enumerate(tracks):
-            track = item['track']
-            song = Song(name=track['name'], artist=track['artists'][0]['name'], url=track['external_urls']['spotify'])
-            songs.append(song)
-        return songs
+    def get_email(self):
+        return self.auth.current_user().get("email", "N/A")
 
-    def get_playlists(self, limit_step=50):
-        playlists = []
-        results = []
+    def get_name(self):
+        return self.auth.current_user().get("display_name", "N/A")
 
-        for offset in range(0, 10000000, limit_step):
-            response = self.auth.current_user_playlists(
-                limit=limit_step,
-                offset=offset,
-            )
+    def get_id(self):
+        return self.auth.current_user().get("id", "N/A")
 
-            if len(response['items']) == 0:
-                break
-            playlists.extend(response['items'])
-            print(offset)
-
-        for idx, item in enumerate(playlists):
-            download_url = item['external_urls']['spotify']
-            playlist = Playlist(name=item['name'], songs=[], url=download_url)
-            results.append(playlist)
-
-        return results
+    def desc(self):
+        return "algo"

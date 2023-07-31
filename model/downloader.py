@@ -16,7 +16,7 @@ class Downloader(ABC):
     @abstractmethod
     def download_song(self, song, download_path):
         pass
-    
+
     def download_songs_worker(self, songs, download_path):
         with self._lock:
             create_directory(download_path)
@@ -53,3 +53,24 @@ class Downloader(ABC):
                 thread.join()
         else:
             print("Method can only be used with Downloadable types.")
+
+    def parse_songs_from_file(file_path):
+        songs = []
+        try:
+            with open(file_path, 'r') as file:
+                lines = file.readlines()
+
+                for line in lines:
+                    parts = line.strip().split(' - ')
+
+                    if len(parts) == 2:
+                        name = parts[0].strip()
+                        artist = parts[1].strip()
+
+                        song = Song(name, artist)
+                        songs.append(song)
+
+        except Exception as e:
+            print(f"An error occurred while parsing the file: {str(e)}")
+
+        return songs

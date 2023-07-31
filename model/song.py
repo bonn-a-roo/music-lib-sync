@@ -21,3 +21,6 @@ class Song(Downloadable):
             song_name = self.name[self.song_index]
             self.song_index += 1
             return self.song_index - 1, song_name
+
+    def desc_filename(self):
+        return self.artist + " - " + self.name + ".mp3"
