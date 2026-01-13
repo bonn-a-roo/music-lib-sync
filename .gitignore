@@ -146,6 +146,10 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Application-specific
+config.ini
+~/.music-lib-sync/
+
 # pytype static type analyzer
 .pytype/
 

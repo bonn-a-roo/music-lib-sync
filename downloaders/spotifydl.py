@@ -1,7 +1,10 @@
 import subprocess
-
 from model.downloader import Downloader
+from model.sync_result import SyncResult
 from utils.fileutils import create_directory, sanitize_filename
+from utils.logutils import get_logger
+
+logger = get_logger(__name__)
 
 
 class SpotifyDownloader(Downloader):
@@ -22,26 +25,24 @@ class SpotifyDownloader(Downloader):
                 if self.cookies:
                     command.extend(['--cookies', self.cookies])
 
-            # Start the subprocess and capture the output
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             while process.poll() is None:
-                # Read a chunk of output
-                output_chunk = process.stdout.read(4096)  # Adjust the chunk size as needed
-
+                output_chunk = process.stdout.read(4096)
                 if output_chunk:
-                    # Process the output chunk and update progress as needed
-                    print(output_chunk)
+                    logger.debug(output_chunk.strip())
 
-            # Print the final output
             final_output, _ = process.communicate()
             if final_output:
-                print(final_output)
+                logger.debug(final_output.strip())
 
             if process.returncode != 0:
-                print(f"An error occurred while downloading the playlist '{playlist.name}'")
+                logger.error(f"Failed to download playlist '{playlist.name}'")
+                return False
+            return True
         except Exception as e:
-            print(f"An error occurred while downloading the playlist '{playlist.name}': {str(e)}")
+            logger.error(f"Exception downloading playlist '{playlist.name}': {e}")
+            return False
 
     def download_song(self, song, download_path):
         download_path = download_path + "/my_songs"
@@ -53,26 +54,24 @@ class SpotifyDownloader(Downloader):
                 if self.cookies:
                     command.extend(['--cookies', self.cookies])
 
-            # Start the subprocess and capture the output
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             while True:
-                # Read a chunk of output
-                output_chunk = process.stdout.read(4096)  # Adjust the chunk size as needed
-
+                output_chunk = process.stdout.read(4096)
                 if output_chunk:
-                    # Process the output chunk and update progress as needed
-                    print(output_chunk)
+                    logger.debug(output_chunk.strip())
                 else:
                     break
 
-            # Print the final output
             final_output, _ = process.communicate()
             if final_output:
-                print(final_output)
+                logger.debug(final_output.strip())
 
             if process.returncode != 0:
-                print(f"An error occurred while downloading '{song.name}'")
+                logger.error(f"Failed to download song '{song.name}'")
+                return False
+            return True
         except Exception as e:
-            print(f"An error occurred while downloading '{song.name}': {str(e)}")
+            logger.error(f"Exception downloading song '{song.name}': {e}")
+            return False
 

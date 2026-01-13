@@ -2,23 +2,21 @@ import spotipy
 from spotipy import SpotifyOAuth
 
 from model.library import SpotifyLibrary
-from model.song import Song
-
-
-def get_all_saved_songs_stub():
-    # Predefined list of songs
-    songs = [
-        Song(name="Song 1", artist="Artist 1"),
-        Song(name="Song 2", artist="Artist 2"),
-        Song(name="Song 3", artist="Artist 3"),
-    ]
-    return songs
+from utils import configutils
 
 
 class User:
 
     def __init__(self, scope='user-library-read'):
-        self.auth = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
+        self.auth = spotipy.Spotify(
+            requests_session=True,
+            auth_manager=SpotifyOAuth(
+                client_id=configutils.get_spotify_client_id(),
+                client_secret=configutils.get_spotify_client_secret(),
+                redirect_uri=configutils.get_spotify_redirect_uri(),
+                scope=scope
+            )
+        )
         self.library = SpotifyLibrary(self.auth)
 
     def sync_music_library(self):
@@ -35,6 +33,3 @@ class User:
 
     def get_id(self):
         return self.auth.current_user().get("id", "N/A")
-
-    def desc(self):
-        return "algo"

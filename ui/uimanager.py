@@ -1,13 +1,10 @@
-import configparser
-import tkinter as tk
-from tkinter import filedialog
-from tkinter import messagebox
-
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
     QLineEdit
 
-from session_manager import SessionManager
+from model.session_manager import SessionManager
+from utils import configutils
+from model.sync_result import SyncResult
 
 
 class OptionsWindow(QWidget):
@@ -43,18 +40,9 @@ class OptionsWindow(QWidget):
         self.load_saved_values()
 
     def load_saved_values(self):
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-
-        # Get the saved download path from the config file
-        download_path = config.get('Settings', 'download_path', fallback='')
-
-        # Get the saved cookies file from the config file
-        cookies_file = config.get('Settings', 'cookies_file', fallback='')
-
-        # Populate the corresponding widgets with the saved values
-        self.download_path_entry.setText(download_path)
-        self.cookies_file_entry.setText(cookies_file)
+        # Populate the widgets with saved values
+        self.download_path_entry.setText(configutils.get_download_path())
+        self.cookies_file_entry.setText(configutils.get_cookies_file())
 
     def browse_download_path(self):
         download_path = QFileDialog.getExistingDirectory(self, "Select Download Path")
@@ -70,21 +58,9 @@ class OptionsWindow(QWidget):
         download_path = self.download_path_entry.text()
         cookies_file = self.cookies_file_entry.text()
 
-        config = configparser.ConfigParser()
-
-        # Read the existing configuration from the config.ini file
-        config.read('config.ini')
-
-        # Update the download path in the configuration
-        config.set('Settings', 'download_path', download_path)
-
-        # Add or update the cookies file path in the configuration
+        configutils.set_value('Settings', 'download_path', download_path)
         if cookies_file:
-            config.set('Settings', 'cookies_file', cookies_file)
-
-        # Write the updated configuration back to the config.ini file
-        with open('config.ini', 'w') as config_file:
-            config.write(config_file)
+            configutils.set_value('Settings', 'cookies_file', cookies_file)
 
         QMessageBox.information(self, "Options Saved", "Options saved successfully.")
 
@@ -120,7 +96,7 @@ class SyncWindow(QWidget):
 
         # Start the songs synchronization in a separate thread
         self.sync_thread = SyncSongsWorker(self.selected_user)
-        self.sync_thread.finished.connect(self.on_sync_finished)
+        self.sync_thread.result_ready.connect(self.on_sync_finished)
         self.sync_thread.start()
 
     def sync_playlists(self):
@@ -130,15 +106,19 @@ class SyncWindow(QWidget):
 
         # Start the playlists synchronization in a separate thread
         self.sync_thread = SyncPlaylistsWorker(self.selected_user)
-        self.sync_thread.finished.connect(self.on_sync_finished)
+        self.sync_thread.result_ready.connect(self.on_sync_finished)
         self.sync_thread.start()
 
-    def on_sync_finished(self):
+    def on_sync_finished(self, result: SyncResult):
         # This method is called when the synchronization is completed
         self.sync_songs_button.setEnabled(True)
         self.sync_playlists_button.setEnabled(True)
         self.options_button.setEnabled(True)
-        QMessageBox.information(self, "Sync Complete", "Music library synchronized successfully.")
+
+        if result.has_failures:
+            QMessageBox.warning(self, "Sync Complete (with errors)", result.get_summary())
+        else:
+            QMessageBox.information(self, "Sync Complete", result.get_summary())
 
     def open_options_window(self):
         if not self.options_window:
@@ -147,27 +127,27 @@ class SyncWindow(QWidget):
 
 
 class SyncSongsWorker(QThread):
-    finished = pyqtSignal()
+    result_ready = pyqtSignal(object)
 
     def __init__(self, selected_user):
         super().__init__()
         self.selected_user = selected_user
 
     def run(self):
-        self.selected_user.library.sync_songs()
-        self.finished.emit()
+        result = self.selected_user.library.sync_songs()
+        self.result_ready.emit(result)
 
 
 class SyncPlaylistsWorker(QThread):
-    finished = pyqtSignal()
+    result_ready = pyqtSignal(object)
 
     def __init__(self, selected_user):
         super().__init__()
         self.selected_user = selected_user
 
     def run(self):
-        self.selected_user.library.sync_playlists()
-        self.finished.emit()
+        result = self.selected_user.library.sync_playlists()
+        self.result_ready.emit(result)
 
 
 class MainWindow(QMainWindow):
