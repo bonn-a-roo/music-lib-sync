@@ -1,0 +1,6 @@
+PyQt5>=5.15.0
+spotipy>=2.19.0
+youtube_dl>=2021.12.17
+yt-dlp>=2023.3.4
+requests>=2.27.1
+configparser>=5.2.0
