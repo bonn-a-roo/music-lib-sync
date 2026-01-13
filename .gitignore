@@ -148,6 +148,7 @@ dmypy.json
 
 # Application-specific
 config.ini
+.spotipy_cache
 ~/.music-lib-sync/
 
 # pytype static type analyzer
