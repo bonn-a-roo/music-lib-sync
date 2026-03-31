@@ -4,3 +4,5 @@ youtube_dl>=2021.12.17
 yt-dlp>=2023.3.4
 requests>=2.27.1
 configparser>=5.2.0
+pytest>=7.0.0
+mutagen>=1.45.0

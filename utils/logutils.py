@@ -32,7 +32,16 @@ def get_logger(name: str) -> logging.Logger:
         file_handler.setFormatter(file_formatter)
 
         # Console handler - info and above only
-        console_handler = logging.StreamHandler()
+        import sys
+        import io
+        try:
+            # Reconfigure stdout to UTF-8 so Unicode playlist names don't crash
+            if hasattr(sys.stdout, 'reconfigure'):
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            console_stream = sys.stdout
+        except Exception:
+            console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        console_handler = logging.StreamHandler(console_stream)
         console_handler.setLevel(logging.INFO)
         console_formatter = logging.Formatter('%(levelname)s: %(message)s')
         console_handler.setFormatter(console_formatter)

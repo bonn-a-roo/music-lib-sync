@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
+import threading
 
 
 @dataclass
@@ -17,23 +18,27 @@ class SyncResult:
     failure_count: int = 0
     skipped_count: int = 0
     errors: List[DownloadError] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def add_success(self):
-        """Increment the success counter."""
-        self.success_count += 1
+        """Increment the success counter (thread-safe)."""
+        with self._lock:
+            self.success_count += 1
 
     def add_failure(self, item_name: str, item_url: Optional[str], error_message: str):
-        """Add a failure record."""
-        self.failure_count += 1
-        self.errors.append(DownloadError(
-            item_name=item_name,
-            item_url=item_url,
-            error_message=error_message
-        ))
+        """Add a failure record (thread-safe)."""
+        with self._lock:
+            self.failure_count += 1
+            self.errors.append(DownloadError(
+                item_name=item_name,
+                item_url=item_url,
+                error_message=error_message
+            ))
 
     def add_skipped(self):
-        """Increment the skipped counter."""
-        self.skipped_count += 1
+        """Increment the skipped counter (thread-safe)."""
+        with self._lock:
+            self.skipped_count += 1
 
     @property
     def total(self) -> int:

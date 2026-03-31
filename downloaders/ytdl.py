@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from model.downloader import Downloader
 
@@ -10,7 +11,7 @@ class YoutubeDownloader(Downloader):
 
     def download_playlist(self, playlist, download_path):
         try:
-            command = ['yt-dlp', '--extract-audio', '--audio-format', 'mp3', '-o', f'{download_path}/%(title)s.%(ext)s']
+            command = [sys.executable, '-m', 'yt_dlp', '--extract-audio', '--audio-format', 'mp3', '-o', f'{download_path}/%(title)s.%(ext)s']
 
             if self.cookies:
                 command.extend(['--cookies', self.cookies])
@@ -30,7 +31,7 @@ class YoutubeDownloader(Downloader):
 
     def download_song(self, song, download_path):
         try:
-            command = ['yt-dlp', '--extract-audio', '--audio-format', 'mp3', '-o', f'{download_path}/%(title)s.%(ext)s']
+            command = [sys.executable, '-m', 'yt_dlp', '--extract-audio', '--audio-format', 'mp3', '-o', f'{download_path}/%(title)s.%(ext)s']
 
             if self.cookies:
                 command.extend(['--cookies', self.cookies])

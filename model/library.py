@@ -1,8 +1,13 @@
 import abc
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from downloaders.spotifydl import SpotifyDownloader
+
+# Cap total concurrent Spotify API requests across all thread pools
+_spotify_semaphore = threading.Semaphore(4)
 from model.playlist import Playlist
 from model.song import Song
 from model.sync_result import SyncResult
@@ -41,26 +46,25 @@ class SpotifyLibrary(LibrarySyncSource):
         songs = []
         offset = 0
         while True:
-            response = self.auth.current_user_saved_tracks(
-                limit=limit_step,
-                offset=offset,
-            )
+            try:
+                response = self.auth.current_user_saved_tracks(
+                    limit=limit_step,
+                    offset=offset,
+                )
 
-            if len(response['items']) == 0:
+                if len(response['items']) == 0:
+                    break
+                tracks.extend(response['items'])
+                offset += limit_step
+            except Exception as e:
+                logger.error(f"Failed to fetch saved tracks at offset {offset}: {e}")
                 break
-            tracks.extend(response['items'])
-            offset += limit_step
 
         for idx, item in enumerate(tracks):
             track = item['track']
-            track_id = track.get('id')
-            song = Song(
-                name=track['name'],
-                artist=track['artists'][0]['name'],
-                url=track['external_urls']['spotify'],
-                track_id=track_id
-            )
-            songs.append(song)
+            song = Song.from_spotify_track(track)
+            if song:
+                songs.append(song)
         return songs
 
     def get_playlists(self, limit_step=50):
@@ -68,57 +72,95 @@ class SpotifyLibrary(LibrarySyncSource):
         results = []
         offset = 0
 
+        logger.info("Fetching playlist list from Spotify...")
         while True:
-            response = self.auth.current_user_playlists(
-                limit=limit_step,
-                offset=offset,
-            )
+            try:
+                response = self.auth.current_user_playlists(
+                    limit=limit_step,
+                    offset=offset,
+                )
 
-            if len(response['items']) == 0:
+                if len(response['items']) == 0:
+                    break
+                playlists.extend(response['items'])
+                logger.info(f"Fetched {len(playlists)} playlists so far...")
+                offset += limit_step
+            except Exception as e:
+                logger.error(f"Failed to fetch playlists at offset {offset}: {e}")
                 break
-            playlists.extend(response['items'])
-            offset += limit_step
 
-        for item in playlists:
+        logger.info(f"Fetched {len(playlists)} playlists total. Now fetching songs for each...")
+
+        def _fetch_playlist(item):
             playlist_url = item['external_urls']['spotify']
-            # Fetch songs for each playlist
+            logger.info(f"Fetching songs for playlist: {item['name']}")
             playlist_songs = self._get_playlist_songs(item['id'])
-            playlist = Playlist(name=item['name'], songs=playlist_songs, url=playlist_url)
-            results.append(playlist)
+            return Playlist(name=item['name'], songs=playlist_songs, url=playlist_url)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(_fetch_playlist, item): item for item in playlists}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    logger.error(f"Failed to process playlist {item.get('name', 'Unknown')}: {e}")
 
         return results
 
     def _get_playlist_songs(self, playlist_id: str) -> list[Song]:
-        """Fetch all songs from a playlist."""
-        songs = []
-        offset = 0
+        """Fetch all songs from a playlist, using parallel requests once total is known."""
         limit_step = 100
 
-        while True:
-            response = self.auth.playlist_items(
-                playlist_id,
-                limit=limit_step,
-                offset=offset,
-                additional_types=('track',)
-            )
+        # First page to get total count
+        try:
+            with _spotify_semaphore:
+                first = self.auth.playlist_items(
+                    playlist_id,
+                    limit=limit_step,
+                    offset=0,
+                    additional_types=('track',)
+                )
+        except Exception as e:
+            logger.error(f"Failed to fetch playlist items: {e}")
+            return []
 
-            if len(response['items']) == 0:
-                break
+        total = first.get('total', 0)
+        logger.info(f"  -> Got {len(first['items'])} tracks at offset 0 (total: {total})")
 
-            for item in response['items']:
+        pages: dict[int, list] = {0: first['items']}
+        remaining_offsets = list(range(limit_step, total, limit_step))
+
+        if remaining_offsets:
+            def _fetch_page(offset):
+                with _spotify_semaphore:
+                    response = self.auth.playlist_items(
+                        playlist_id,
+                        limit=limit_step,
+                        offset=offset,
+                        additional_types=('track',)
+                    )
+                logger.info(f"  -> Got {len(response['items'])} tracks at offset {offset}")
+                return offset, response['items']
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_fetch_page, off): off for off in remaining_offsets}
+                for future in as_completed(futures):
+                    try:
+                        offset, items = future.result()
+                        pages[offset] = items
+                    except Exception as e:
+                        logger.error(f"Failed to fetch page: {e}")
+
+        songs = []
+        for offset in sorted(pages):
+            for item in pages[offset]:
                 track = item.get('track')
                 if track is None:
-                    continue  # Track might be removed/unavailable
-                track_id = track.get('id')
-                song = Song(
-                    name=track['name'],
-                    artist=track['artists'][0]['name'],
-                    url=track['external_urls']['spotify'],
-                    track_id=track_id
-                )
-                songs.append(song)
-
-            offset += limit_step
+                    continue
+                song = Song.from_spotify_track(track)
+                if song:
+                    songs.append(song)
 
         return songs
 
@@ -140,7 +182,13 @@ class SpotifyLibrary(LibrarySyncSource):
 
     def sync_songs(self) -> SyncResult:
         cookies = configutils.get_cookies_file()
-        downloader = SpotifyDownloader(cookies=cookies if cookies else None)
+        client_id = configutils.get_spotify_client_id()
+        client_secret = configutils.get_spotify_client_secret()
+        downloader = SpotifyDownloader(
+            cookies=cookies if cookies else None,
+            client_id=client_id,
+            client_secret=client_secret
+        )
         download_path = configutils.get_download_path()
 
         my_songs = self.get_saved_tracks()
@@ -156,13 +204,19 @@ class SpotifyLibrary(LibrarySyncSource):
 
         logger.info(f"Downloading {len(songs_to_download)} new songs (skipping {len(my_songs) - len(songs_to_download)} already downloaded)")
 
-        result = downloader.download(songs_to_download, download_path, num_threads=16)
+        result = downloader.download(songs_to_download, my_songs_dir, num_threads=4)  # Reduced from 16 to 4 to avoid rate limits
         result.skipped_count = len(my_songs) - len(songs_to_download)
         return result
 
     def sync_playlists(self) -> SyncResult:
         cookies = configutils.get_cookies_file()
-        downloader = SpotifyDownloader(cookies=cookies if cookies else None)
+        client_id = configutils.get_spotify_client_id()
+        client_secret = configutils.get_spotify_client_secret()
+        downloader = SpotifyDownloader(
+            cookies=cookies if cookies else None,
+            client_id=client_id,
+            client_secret=client_secret
+        )
         download_path = configutils.get_download_path()
 
         my_playlists = self.get_playlists()
@@ -182,7 +236,7 @@ class SpotifyLibrary(LibrarySyncSource):
             logger.info(f"Playlist '{playlist.name}': {len(songs_to_download)} new songs out of {len(playlist.songs)} total")
 
             if songs_to_download:
-                playlist_result = downloader.download(songs_to_download, download_path, num_threads=1)
+                playlist_result = downloader.download(songs_to_download, playlist_dir, num_threads=1)
                 result.success_count += playlist_result.success_count
                 result.failure_count += playlist_result.failure_count
                 result.errors.extend(playlist_result.errors)

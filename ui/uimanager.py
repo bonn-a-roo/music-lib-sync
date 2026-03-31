@@ -58,7 +58,8 @@ class OptionsWindow(QWidget):
         download_path = self.download_path_entry.text()
         cookies_file = self.cookies_file_entry.text()
 
-        configutils.set_value('Settings', 'download_path', download_path)
+        if download_path:
+            configutils.set_value('Settings', 'download_path', download_path)
         if cookies_file:
             configutils.set_value('Settings', 'cookies_file', cookies_file)
 
@@ -94,6 +95,10 @@ class SyncWindow(QWidget):
         self.sync_songs_button.setEnabled(False)
         self.options_button.setEnabled(False)
 
+        # Clean up old thread if it exists
+        if self.sync_thread is not None:
+            self.sync_thread.wait()
+
         # Start the songs synchronization in a separate thread
         self.sync_thread = SyncSongsWorker(self.selected_user)
         self.sync_thread.result_ready.connect(self.on_sync_finished)
@@ -103,6 +108,10 @@ class SyncWindow(QWidget):
         self.sync_songs_button.setEnabled(False)
         self.sync_playlists_button.setEnabled(False)
         self.options_button.setEnabled(False)
+
+        # Clean up old thread if it exists
+        if self.sync_thread is not None:
+            self.sync_thread.wait()
 
         # Start the playlists synchronization in a separate thread
         self.sync_thread = SyncPlaylistsWorker(self.selected_user)
@@ -172,7 +181,9 @@ class MainWindow(QMainWindow):
         self.sync_button.clicked.connect(self.handle_user_selection)
         layout.addWidget(self.sync_button)
 
-    def handle_user_selection(self, index):
+    def handle_user_selection(self, index=None):
+        if index is None:
+            index = self.user_selection.currentIndex()
         id_part = self.user_selection.itemText(index).split("(")[1].rstrip(")")  # Remove name, "(" and ")"
         user_id = id_part.strip()
         self.session_manager.set_session_id(user_id)

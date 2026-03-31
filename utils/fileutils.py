@@ -6,9 +6,6 @@ import re
 def create_directory(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
-        print(f"Directory '{directory}' created successfully.")
-    else:
-        print(f"Directory '{directory}' already exists.")
 
 
 def sanitize_filename(filename):
