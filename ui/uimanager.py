@@ -1,3 +1,5 @@
+import time
+
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
@@ -6,6 +8,17 @@ from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushB
 from model.session_manager import SessionManager
 from utils import configutils
 from model.sync_result import SyncResult
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 
 class OptionsWindow(QWidget):
@@ -117,6 +130,9 @@ class SyncWindow(QWidget):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setVisible(False)
 
+        self.eta_label = QLabel("", self)
+        self.eta_label.setVisible(False)
+
         self.status_label = QLabel("", self)
         self.status_label.setVisible(False)
 
@@ -131,11 +147,18 @@ class SyncWindow(QWidget):
         self.log_output.setMaximumHeight(200)
         self.log_output.setVisible(False)
 
+        self._sync_start: float = 0.0
+        self._progress_state = (0, 0)
+        self._eta_timer = QTimer(self)
+        self._eta_timer.setInterval(1000)
+        self._eta_timer.timeout.connect(self._update_eta)
+
         layout = QVBoxLayout()
         layout.addWidget(self.sync_songs_button)
         layout.addWidget(self.sync_playlists_button)
         layout.addWidget(self.options_button)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.eta_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.cancel_button)
         layout.addWidget(self.log_output)
@@ -155,9 +178,14 @@ class SyncWindow(QWidget):
         self.sync_thread.progress.connect(self.on_progress)
         self.sync_thread.log_line.connect(self.append_log)
 
+        self._sync_start = time.time()
+        self._progress_state = (0, 0)
+
         self.progress_bar.setMaximum(0)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
+        self.eta_label.setText("Elapsed: 0s")
+        self.eta_label.setVisible(True)
         self.status_label.setText("")
         self.status_label.setVisible(True)
         self.cancel_button.setText("Cancel")
@@ -166,6 +194,7 @@ class SyncWindow(QWidget):
         self.log_output.clear()
         self.log_output.setVisible(True)
 
+        self._eta_timer.start()
         self.sync_thread.start()
 
     def sync_songs(self):
@@ -185,7 +214,20 @@ class SyncWindow(QWidget):
         sb = self.log_output.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _update_eta(self):
+        elapsed = time.time() - self._sync_start
+        current, total = self._progress_state
+        if current > 0 and total > 0 and current < total:
+            rate = current / elapsed
+            eta = (total - current) / rate
+            self.eta_label.setText(
+                f"Elapsed: {_fmt_duration(elapsed)}  |  ETA: {_fmt_duration(eta)}"
+            )
+        else:
+            self.eta_label.setText(f"Elapsed: {_fmt_duration(elapsed)}")
+
     def on_progress(self, current: int, total: int, name: str):
+        self._progress_state = (current, total)
         if total > 0:
             self.progress_bar.setMaximum(total)
             self.progress_bar.setValue(current)
@@ -193,10 +235,12 @@ class SyncWindow(QWidget):
             self.status_label.setText(f"Downloading: {name}")
 
     def on_sync_finished(self, result: SyncResult):
+        self._eta_timer.stop()
         self.sync_songs_button.setEnabled(True)
         self.sync_playlists_button.setEnabled(True)
         self.options_button.setEnabled(True)
         self.progress_bar.setVisible(False)
+        self.eta_label.setVisible(False)
         self.status_label.setVisible(False)
         self.cancel_button.setVisible(False)
         self.cancel_button.setText("Cancel")

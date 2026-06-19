@@ -11,8 +11,20 @@ from utils.logutils import get_logger
 
 logger = get_logger(__name__)
 
-_CONCURRENT_FRAGMENTS = 5   # HLS fragments downloaded in parallel per song
-_DEFAULT_WORKERS = 3        # songs downloaded in parallel
+_CONCURRENT_FRAGMENTS = 5
+_DEFAULT_WORKERS = 3
+
+# Each entry: (label, query_fn, use_hls)
+# use_hls=True  → YouTube HLS format (works on this network)
+# use_hls=False → generic bestaudio (for SoundCloud etc.)
+_STRATEGIES = [
+    ('YouTube',       lambda s: f'ytsearch1:{s.artist} - {s.name}',            True),
+    ('YouTube (alt)', lambda s: f'ytsearch1:{s.name} {s.artist} official audio', True),
+    ('SoundCloud',    lambda s: f'scsearch1:{s.artist} - {s.name}',             False),
+]
+
+_HLS_FORMAT = 'bestaudio[protocol=m3u8_native]/bestaudio[protocol=m3u8]/91/best[protocol^=m3u8]'
+_GENERIC_FORMAT = 'bestaudio/best'
 
 
 class YoutubeDownloader(Downloader):
@@ -56,7 +68,8 @@ class YoutubeDownloader(Downloader):
         if self.log_callback and line:
             self.log_callback(line)
 
-    def _ytdlp_cmd(self, query: str, output_path: str) -> list:
+    def _build_cmd(self, query: str, output_path: str, use_hls: bool) -> list:
+        fmt = _HLS_FORMAT if use_hls else _GENERIC_FORMAT
         cmd = [
             sys.executable, '-m', 'yt_dlp',
             '--cookies-from-browser', self.browser,
@@ -66,7 +79,7 @@ class YoutubeDownloader(Downloader):
             '--extract-audio',
             '--audio-format', 'mp3',
             '--audio-quality', '0',
-            '--format', 'bestaudio[protocol=m3u8_native]/bestaudio[protocol=m3u8]/91/best[protocol^=m3u8]',
+            '--format', fmt,
             '--concurrent-fragments', str(_CONCURRENT_FRAGMENTS),
             '--output', output_path,
         ]
@@ -75,18 +88,9 @@ class YoutubeDownloader(Downloader):
         cmd.append(query)
         return cmd
 
-    def _download_one(self, song, download_path: str, result: SyncResult,
-                      completed: list, total: int, progress_callback) -> None:
-        if self._cancel_event.is_set():
-            return
-
-        query = f'ytsearch1:{song.artist} - {song.name}'
-        out_tmpl = os.path.join(download_path, f'{song.artist} - {song.name} [{song.track_id}].%(ext)s')
-        cmd = self._ytdlp_cmd(query, out_tmpl)
-
-        self._log(f'--- Downloading: {song.artist} - {song.name} ---')
-        logger.info(f'Downloading: {song.artist} - {song.name}')
-
+    def _try_strategy(self, query: str, out_tmpl: str, use_hls: bool) -> bool:
+        """Run one yt-dlp attempt. Returns True on success."""
+        cmd = self._build_cmd(query, out_tmpl, use_hls)
         proc = None
         try:
             proc = subprocess.Popen(
@@ -108,48 +112,58 @@ class YoutubeDownloader(Downloader):
 
             proc.wait()
             returncode = proc.returncode
-
-            with self._process_lock:
-                self._running_processes.discard(proc)
-
-            if returncode == 0:
-                result.add_success()
-                self._log(f'OK: {song.artist} - {song.name}')
-            else:
-                tail = '\n'.join(output_lines[-5:])
-                logger.error(f'Failed {song.artist} - {song.name}: {tail}')
-                result.add_failure(str(song), query, f'yt-dlp exit {returncode}')
-
         except Exception as e:
+            self._log(f'  ERROR: {e}')
+            returncode = -1
+        finally:
             if proc is not None:
                 with self._process_lock:
                     self._running_processes.discard(proc)
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            logger.error(f'Exception for {song}: {e}')
-            self._log(f'ERROR: {e}')
-            result.add_failure(str(song), query, str(e))
 
-        finally:
-            with self._process_lock:
-                done = result.success_count + result.failure_count
-            if progress_callback:
-                progress_callback(done, total, f'{song.artist} - {song.name}')
+        return returncode == 0
+
+    def _download_one(self, song, download_path: str, result: SyncResult,
+                      total: int, progress_callback) -> None:
+        if self._cancel_event.is_set():
+            return
+
+        out_tmpl = os.path.join(download_path,
+                                f'{song.artist} - {song.name} [{song.track_id}].%(ext)s')
+        last_error = 'all strategies failed'
+
+        for label, query_fn, use_hls in _STRATEGIES:
+            if self._cancel_event.is_set():
+                break
+            query = query_fn(song)
+            self._log(f'  [{label}] {query}')
+            logger.info(f'Trying {label}: {song.artist} - {song.name}')
+
+            if self._try_strategy(query, out_tmpl, use_hls):
+                result.add_success()
+                self._log(f'OK [{label}]: {song.artist} - {song.name}')
+                logger.info(f'Downloaded via {label}: {song.artist} - {song.name}')
+                break
+            else:
+                last_error = f'{label} failed'
+                self._log(f'  [{label}] failed, trying next...')
+        else:
+            logger.error(f'All strategies failed for {song}')
+            result.add_failure(str(song), '', last_error)
+
+        done = result.success_count + result.failure_count
+        if progress_callback:
+            progress_callback(done, total, f'{song.artist} - {song.name}')
 
     def download_songs_batch(self, songs: list, download_path: str, result: 'SyncResult',
                              batch_size: int = 10, progress_callback=None):
         os.makedirs(download_path, exist_ok=True)
         total = len(songs)
-        completed = [0]  # mutable counter accessed from threads
-
-        self._log(f'Starting {total} downloads with {self.workers} parallel workers...')
+        self._log(f'Starting {total} downloads ({self.workers} parallel workers)...')
 
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             futures = {
                 pool.submit(self._download_one, song, download_path, result,
-                            completed, total, progress_callback): song
+                            total, progress_callback): song
                 for song in songs
             }
             for future in as_completed(futures):
