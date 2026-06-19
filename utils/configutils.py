@@ -5,6 +5,7 @@ from pathlib import Path
 CONFIG_FILE = 'config.ini'
 DEFAULT_DOWNLOAD_PATH = str(Path.home() / 'Music' / 'downloads')
 DEFAULT_COOKIES_FILE = ''
+DEFAULT_AUDIO_FORMAT = 'mp3'
 
 
 def ask_download_path():
@@ -42,6 +43,14 @@ def get_cookies_file() -> str:
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE)
     return config.get('Settings', 'cookies_file', fallback=DEFAULT_COOKIES_FILE)
+
+
+def get_audio_format() -> str:
+    """Get preferred audio format from config."""
+    _ensure_config_exists()
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    return config.get('Settings', 'audio_format', fallback=DEFAULT_AUDIO_FORMAT)
 
 
 def get_spotify_client_id() -> str:

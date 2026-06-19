@@ -58,6 +58,8 @@ class SpotifyDownloader(Downloader):
             cmd.extend(['--client-secret', self.client_secret])
         if self.cookies:
             cmd.extend(['--cookie-file', self.cookies])
+        from utils import configutils
+        cmd.extend(['--format', configutils.get_audio_format()])
         return cmd
 
     def download_songs_batch(self, songs: list, download_path: str, result: 'SyncResult', batch_size: int = 50):

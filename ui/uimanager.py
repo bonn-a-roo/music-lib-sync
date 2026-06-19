@@ -1,6 +1,6 @@
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
-    QLineEdit
+    QLineEdit, QHBoxLayout
 
 from model.session_manager import SessionManager
 from utils import configutils
@@ -22,6 +22,10 @@ class OptionsWindow(QWidget):
         self.browse_cookies_button = QPushButton("Browse", self)
         self.browse_cookies_button.clicked.connect(self.browse_cookies_file)
 
+        self.format_label = QLabel("Audio Format:", self)
+        self.format_combo = QComboBox(self)
+        self.format_combo.addItems(['mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav'])
+
         self.save_button = QPushButton("Save Options", self)
         self.save_button.clicked.connect(self.save_options)
 
@@ -32,7 +36,17 @@ class OptionsWindow(QWidget):
         layout.addWidget(self.cookies_file_label)
         layout.addWidget(self.cookies_file_entry)
         layout.addWidget(self.browse_cookies_button)
+
+        format_row = QHBoxLayout()
+        format_row.addWidget(self.format_label)
+        format_row.addWidget(self.format_combo)
+        layout.addLayout(format_row)
+
         layout.addWidget(self.save_button)
+
+        self.status_label = QLabel("", self)
+        self.status_label.setStyleSheet("color: green;")
+        layout.addWidget(self.status_label)
 
         self.setLayout(layout)
 
@@ -40,9 +54,12 @@ class OptionsWindow(QWidget):
         self.load_saved_values()
 
     def load_saved_values(self):
-        # Populate the widgets with saved values
         self.download_path_entry.setText(configutils.get_download_path())
         self.cookies_file_entry.setText(configutils.get_cookies_file())
+        fmt = configutils.get_audio_format()
+        idx = self.format_combo.findText(fmt)
+        if idx >= 0:
+            self.format_combo.setCurrentIndex(idx)
 
     def browse_download_path(self):
         download_path = QFileDialog.getExistingDirectory(self, "Select Download Path")
@@ -62,8 +79,10 @@ class OptionsWindow(QWidget):
             configutils.set_value('Settings', 'download_path', download_path)
         if cookies_file:
             configutils.set_value('Settings', 'cookies_file', cookies_file)
+        configutils.set_value('Settings', 'audio_format', self.format_combo.currentText())
 
-        QMessageBox.information(self, "Options Saved", "Options saved successfully.")
+        self.status_label.setText("Saved.")
+        QTimer.singleShot(2000, lambda: self.status_label.setText(""))
 
 
 class SyncWindow(QWidget):
