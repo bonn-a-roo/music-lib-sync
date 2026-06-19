@@ -18,6 +18,7 @@ class SyncResult:
     failure_count: int = 0
     skipped_count: int = 0
     errors: List[DownloadError] = field(default_factory=list)
+    cancelled: bool = field(default=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def add_success(self):
@@ -59,6 +60,7 @@ class SyncResult:
 
     def get_summary(self) -> str:
         """Get a human-readable summary of the sync result."""
+        prefix = "Sync cancelled.\n\n" if self.cancelled else ""
         parts = [
             f"Completed: {self.success_count} succeeded",
         ]
@@ -67,7 +69,7 @@ class SyncResult:
         if self.skipped_count > 0:
             parts.append(f"{self.skipped_count} skipped")
 
-        summary = ", ".join(parts)
+        summary = prefix + ", ".join(parts)
         if self.has_failures:
             summary += f"\n\nErrors:\n" + "\n".join(
                 f"- {e.item_name}: {e.error_message}"

@@ -1,6 +1,6 @@
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
-    QLineEdit, QHBoxLayout
+    QLineEdit, QHBoxLayout, QProgressBar
 
 from model.session_manager import SessionManager
 from utils import configutils
@@ -26,6 +26,10 @@ class OptionsWindow(QWidget):
         self.format_combo = QComboBox(self)
         self.format_combo.addItems(['mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav'])
 
+        self.providers_label = QLabel("Audio Providers:", self)
+        self.providers_entry = QLineEdit(self)
+        self.providers_entry.setPlaceholderText("e.g. piped youtube")
+
         self.save_button = QPushButton("Save Options", self)
         self.save_button.clicked.connect(self.save_options)
 
@@ -41,6 +45,9 @@ class OptionsWindow(QWidget):
         format_row.addWidget(self.format_label)
         format_row.addWidget(self.format_combo)
         layout.addLayout(format_row)
+
+        layout.addWidget(self.providers_label)
+        layout.addWidget(self.providers_entry)
 
         layout.addWidget(self.save_button)
 
@@ -60,6 +67,7 @@ class OptionsWindow(QWidget):
         idx = self.format_combo.findText(fmt)
         if idx >= 0:
             self.format_combo.setCurrentIndex(idx)
+        self.providers_entry.setText(configutils.get_audio_providers())
 
     def browse_download_path(self):
         download_path = QFileDialog.getExistingDirectory(self, "Select Download Path")
@@ -80,6 +88,9 @@ class OptionsWindow(QWidget):
         if cookies_file:
             configutils.set_value('Settings', 'cookies_file', cookies_file)
         configutils.set_value('Settings', 'audio_format', self.format_combo.currentText())
+        providers = self.providers_entry.text().strip()
+        if providers:
+            configutils.set_value('Settings', 'audio_providers', providers)
 
         self.status_label.setText("Saved.")
         QTimer.singleShot(2000, lambda: self.status_label.setText(""))
@@ -102,48 +113,82 @@ class SyncWindow(QWidget):
         self.options_button = QPushButton("Options", self)
         self.options_button.clicked.connect(self.open_options_window)
 
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setVisible(False)
+
+        self.status_label = QLabel("", self)
+        self.status_label.setVisible(False)
+
+        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_sync)
+
         layout = QVBoxLayout()
         layout.addWidget(self.sync_songs_button)
         layout.addWidget(self.sync_playlists_button)
         layout.addWidget(self.options_button)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.cancel_button)
 
         self.setLayout(layout)
 
-    def sync_songs(self):
-        self.sync_playlists_button.setEnabled(False)
+    def _start_sync(self, worker):
         self.sync_songs_button.setEnabled(False)
+        self.sync_playlists_button.setEnabled(False)
         self.options_button.setEnabled(False)
 
-        # Clean up old thread if it exists
         if self.sync_thread is not None:
             self.sync_thread.wait()
 
-        # Start the songs synchronization in a separate thread
-        self.sync_thread = SyncSongsWorker(self.selected_user)
+        self.sync_thread = worker
         self.sync_thread.result_ready.connect(self.on_sync_finished)
+        self.sync_thread.progress.connect(self.on_progress)
+
+        self.progress_bar.setMaximum(0)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("")
+        self.status_label.setVisible(True)
+        self.cancel_button.setText("Cancel")
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setVisible(True)
+
         self.sync_thread.start()
+
+    def sync_songs(self):
+        self._start_sync(SyncSongsWorker(self.selected_user))
 
     def sync_playlists(self):
-        self.sync_songs_button.setEnabled(False)
-        self.sync_playlists_button.setEnabled(False)
-        self.options_button.setEnabled(False)
+        self._start_sync(SyncPlaylistsWorker(self.selected_user))
 
-        # Clean up old thread if it exists
-        if self.sync_thread is not None:
-            self.sync_thread.wait()
+    def cancel_sync(self):
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Cancelling...")
+        if self.sync_thread:
+            self.sync_thread.cancel()
 
-        # Start the playlists synchronization in a separate thread
-        self.sync_thread = SyncPlaylistsWorker(self.selected_user)
-        self.sync_thread.result_ready.connect(self.on_sync_finished)
-        self.sync_thread.start()
+    def on_progress(self, current: int, total: int, name: str):
+        if total > 0:
+            self.progress_bar.setMaximum(total)
+            self.progress_bar.setValue(current)
+        if name:
+            self.status_label.setText(f"Downloading: {name}")
 
     def on_sync_finished(self, result: SyncResult):
-        # This method is called when the synchronization is completed
         self.sync_songs_button.setEnabled(True)
         self.sync_playlists_button.setEnabled(True)
         self.options_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setVisible(False)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.setText("Cancel")
+        self.cancel_button.setEnabled(True)
 
-        if result.has_failures:
+        if result.cancelled:
+            msg = result.get_summary() + "\n\nRun sync again to continue where you left off."
+            QMessageBox.information(self, "Sync Cancelled", msg)
+        elif result.has_failures:
             QMessageBox.warning(self, "Sync Complete (with errors)", result.get_summary())
         else:
             QMessageBox.information(self, "Sync Complete", result.get_summary())
@@ -156,25 +201,61 @@ class SyncWindow(QWidget):
 
 class SyncSongsWorker(QThread):
     result_ready = pyqtSignal(object)
+    progress = pyqtSignal(int, int, str)
 
     def __init__(self, selected_user):
         super().__init__()
         self.selected_user = selected_user
+        self._downloader = None
+
+    def cancel(self):
+        if self._downloader:
+            self._downloader.cancel()
 
     def run(self):
-        result = self.selected_user.library.sync_songs()
+        from utils import configutils
+        from downloaders.spotifydl import SpotifyDownloader
+        self._downloader = SpotifyDownloader(
+            cookies=configutils.get_cookies_file() or None,
+            client_id=configutils.get_spotify_client_id(),
+            client_secret=configutils.get_spotify_client_secret(),
+        )
+        def _progress(current, total, name):
+            self.progress.emit(current, total, name)
+        result = self.selected_user.library.sync_songs(
+            downloader=self._downloader,
+            progress_callback=_progress,
+        )
         self.result_ready.emit(result)
 
 
 class SyncPlaylistsWorker(QThread):
     result_ready = pyqtSignal(object)
+    progress = pyqtSignal(int, int, str)
 
     def __init__(self, selected_user):
         super().__init__()
         self.selected_user = selected_user
+        self._downloader = None
+
+    def cancel(self):
+        if self._downloader:
+            self._downloader.cancel()
 
     def run(self):
-        result = self.selected_user.library.sync_playlists()
+        from utils import configutils
+        from downloaders.spotifydl import SpotifyDownloader
+        self._downloader = SpotifyDownloader(
+            cookies=configutils.get_cookies_file() or None,
+            client_id=configutils.get_spotify_client_id(),
+            client_secret=configutils.get_spotify_client_secret(),
+        )
+        def _progress(current, total, name):
+            self.progress.emit(current, total, name)
+        result = self.selected_user.library.sync_playlists(
+            downloader=self._downloader,
+            progress_callback=_progress,
+        )
         self.result_ready.emit(result)
 
 

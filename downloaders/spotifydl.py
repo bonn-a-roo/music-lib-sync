@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from model.downloader import Downloader
 from model.sync_result import SyncResult
@@ -27,6 +28,19 @@ class SpotifyDownloader(Downloader):
         self.client_id = client_id
         self.client_secret = client_secret
         self.ffmpeg_path = self._find_ffmpeg()
+        self._cancel_event = threading.Event()
+        self._current_process = None
+
+    def cancel(self):
+        self._cancel_event.set()
+        if self._current_process:
+            try:
+                self._current_process.kill()
+            except Exception:
+                pass
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def _find_ffmpeg(self) -> str:
         """Find the ffmpeg executable, checking spotdl's download location."""
@@ -47,9 +61,15 @@ class SpotifyDownloader(Downloader):
         logger.warning("FFmpeg not found - downloads may fail")
         return None
 
-    def _base_command(self) -> list:
-        """Build the base spotdl command with all credentials/flags."""
-        cmd = [sys.executable, '-m', 'spotdl']
+    def _spotdl_cmd(self, action: str, queries: list, extra_flags: list = None) -> list:
+        """Build a complete spotdl command.
+
+        Structure: python -m spotdl <action> <queries> <flags> [--audio ...]
+        Queries (URLs) must come before flags because --audio uses nargs='*'
+        and greedily consumes anything that follows until the next --flag.
+        """
+        from utils import configutils
+        cmd = [sys.executable, '-m', 'spotdl', action] + queries
         if self.ffmpeg_path:
             cmd.extend(['--ffmpeg', self.ffmpeg_path])
         if self.client_id:
@@ -58,11 +78,15 @@ class SpotifyDownloader(Downloader):
             cmd.extend(['--client-secret', self.client_secret])
         if self.cookies:
             cmd.extend(['--cookie-file', self.cookies])
-        from utils import configutils
         cmd.extend(['--format', configutils.get_audio_format()])
+        if extra_flags:
+            cmd.extend(extra_flags)
+        providers = configutils.get_audio_providers().split()
+        if providers:
+            cmd.extend(['--audio'] + providers)
         return cmd
 
-    def download_songs_batch(self, songs: list, download_path: str, result: 'SyncResult', batch_size: int = 50):
+    def download_songs_batch(self, songs: list, download_path: str, result: 'SyncResult', batch_size: int = 50, progress_callback=None):
         """
         Download a list of songs in batches, passing multiple URLs to one spotdl call.
         Much faster than one process per song.
@@ -71,29 +95,38 @@ class SpotifyDownloader(Downloader):
         total = len(songs)
 
         for batch_start in range(0, total, batch_size):
+            if self._cancel_event.is_set():
+                break
+
             batch = songs[batch_start:batch_start + batch_size]
             batch_end = min(batch_start + batch_size, total)
             logger.info(f"Downloading batch {batch_start + 1}-{batch_end} of {total}...")
 
+            if progress_callback:
+                progress_callback(batch_start, total, str(batch[0]) if batch else '')
+
             urls = [song.url for song in batch]
-            command = self._base_command() + ['download'] + urls + ['--output', download_path, '--threads', '4']
+            command = self._spotdl_cmd('download', urls, ['--output', download_path, '--threads', '4'])
 
             if not self.cookies:
                 logger.warning("No cookies file configured — downloads may fail due to YouTube rate limiting. Set one in Options.")
 
             files_before = set(os.listdir(download_path))
             try:
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                self._current_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 try:
-                    output, _ = process.communicate(timeout=300 * len(batch))
+                    output, _ = self._current_process.communicate(timeout=300 * len(batch))
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    output, _ = process.communicate()
+                    self._current_process.kill()
+                    output, _ = self._current_process.communicate()
                     logger.error(f"Batch timed out. Last output: {output[-500:] if output else 'none'}")
+                finally:
+                    self._current_process = None
 
                 if output:
                     logger.info(f"spotdl batch output: {output.strip()[-2000:]}")
             except Exception as e:
+                self._current_process = None
                 logger.error(f"Exception in batch download: {e}")
                 for song in batch:
                     result.add_failure(str(song), song.url, str(e))
@@ -111,7 +144,10 @@ class SpotifyDownloader(Downloader):
                 if i >= succeeded:
                     result.add_failure(str(song), song.url, "Not downloaded")
 
-    def download(self, objects, download_path, num_threads=2) -> 'SyncResult':
+            if progress_callback:
+                progress_callback(min(batch_start + batch_size, total), total, '')
+
+    def download(self, objects, download_path, num_threads=2, progress_callback=None) -> 'SyncResult':
         """Override to use batch downloading for songs."""
         from model.song import Song as SongModel
         from model.playlist import Playlist as PlaylistModel
@@ -121,7 +157,7 @@ class SpotifyDownloader(Downloader):
             return result
 
         if all(isinstance(item, SongModel) for item in objects):
-            self.download_songs_batch(objects, download_path, result)
+            self.download_songs_batch(objects, download_path, result, progress_callback=progress_callback)
             logger.info(f"Download complete: {result.success_count} succeeded, {result.failure_count} failed, {result.skipped_count} skipped")
             return result
 
@@ -163,25 +199,31 @@ class SpotifyDownloader(Downloader):
 
     def download_playlist(self, playlist, download_path):
         # download_path should already include the full playlist path from library.py
+        if self._cancel_event.is_set():
+            return False
         try:
             os.makedirs(download_path, exist_ok=True)
-            command = self._base_command() + ['download', playlist.url, '--output', download_path, '--threads', '4']
+            command = self._spotdl_cmd('download', [playlist.url], ['--output', download_path, '--threads', '4'])
 
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self._current_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
-                output, _ = process.communicate(timeout=3600)  # 1 hour for full playlist
+                output, _ = self._current_process.communicate(timeout=3600)  # 1 hour for full playlist
                 if output:
                     logger.debug(output.strip()[-1000:])
             except subprocess.TimeoutExpired:
-                process.kill()
+                self._current_process.kill()
                 logger.error(f"Download timed out for playlist '{playlist.name}'")
                 return False
+            finally:
+                returncode = self._current_process.returncode
+                self._current_process = None
 
-            if process.returncode != 0:
+            if returncode != 0:
                 logger.error(f"Failed to download playlist '{playlist.name}'")
                 return False
             return True
         except Exception as e:
+            self._current_process = None
             logger.error(f"Exception downloading playlist '{playlist.name}': {e}")
             return False
 

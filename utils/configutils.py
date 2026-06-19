@@ -6,6 +6,7 @@ CONFIG_FILE = 'config.ini'
 DEFAULT_DOWNLOAD_PATH = str(Path.home() / 'Music' / 'downloads')
 DEFAULT_COOKIES_FILE = ''
 DEFAULT_AUDIO_FORMAT = 'mp3'
+DEFAULT_AUDIO_PROVIDERS = 'piped youtube'
 
 
 def ask_download_path():
@@ -51,6 +52,14 @@ def get_audio_format() -> str:
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE)
     return config.get('Settings', 'audio_format', fallback=DEFAULT_AUDIO_FORMAT)
+
+
+def get_audio_providers() -> str:
+    """Get preferred audio providers for spotdl (space-separated, e.g. 'piped youtube')."""
+    _ensure_config_exists()
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    return config.get('Settings', 'audio_providers', fallback=DEFAULT_AUDIO_PROVIDERS)
 
 
 def get_spotify_client_id() -> str:

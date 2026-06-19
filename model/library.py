@@ -180,15 +180,14 @@ class SpotifyLibrary(LibrarySyncSource):
 
         return track_ids
 
-    def sync_songs(self) -> SyncResult:
-        cookies = configutils.get_cookies_file()
-        client_id = configutils.get_spotify_client_id()
-        client_secret = configutils.get_spotify_client_secret()
-        downloader = SpotifyDownloader(
-            cookies=cookies if cookies else None,
-            client_id=client_id,
-            client_secret=client_secret
-        )
+    def sync_songs(self, downloader=None, progress_callback=None) -> SyncResult:
+        if downloader is None:
+            cookies = configutils.get_cookies_file()
+            downloader = SpotifyDownloader(
+                cookies=cookies if cookies else None,
+                client_id=configutils.get_spotify_client_id(),
+                client_secret=configutils.get_spotify_client_secret(),
+            )
         download_path = configutils.get_download_path()
 
         my_songs = self.get_saved_tracks()
@@ -204,19 +203,20 @@ class SpotifyLibrary(LibrarySyncSource):
 
         logger.info(f"Downloading {len(songs_to_download)} new songs (skipping {len(my_songs) - len(songs_to_download)} already downloaded)")
 
-        result = downloader.download(songs_to_download, my_songs_dir, num_threads=4)  # Reduced from 16 to 4 to avoid rate limits
+        result = downloader.download(songs_to_download, my_songs_dir, num_threads=4, progress_callback=progress_callback)
         result.skipped_count = len(my_songs) - len(songs_to_download)
+        if downloader.is_cancelled():
+            result.cancelled = True
         return result
 
-    def sync_playlists(self) -> SyncResult:
-        cookies = configutils.get_cookies_file()
-        client_id = configutils.get_spotify_client_id()
-        client_secret = configutils.get_spotify_client_secret()
-        downloader = SpotifyDownloader(
-            cookies=cookies if cookies else None,
-            client_id=client_id,
-            client_secret=client_secret
-        )
+    def sync_playlists(self, downloader=None, progress_callback=None) -> SyncResult:
+        if downloader is None:
+            cookies = configutils.get_cookies_file()
+            downloader = SpotifyDownloader(
+                cookies=cookies if cookies else None,
+                client_id=configutils.get_spotify_client_id(),
+                client_secret=configutils.get_spotify_client_secret(),
+            )
         download_path = configutils.get_download_path()
 
         my_playlists = self.get_playlists()
@@ -226,6 +226,9 @@ class SpotifyLibrary(LibrarySyncSource):
         result = SyncResult()
 
         for playlist in my_playlists:
+            if downloader.is_cancelled():
+                break
+
             playlist_dir = os.path.join(download_path, "playlists", playlist.name)
             if not os.path.exists(playlist_dir):
                 os.makedirs(playlist_dir)
@@ -236,13 +239,15 @@ class SpotifyLibrary(LibrarySyncSource):
             logger.info(f"Playlist '{playlist.name}': {len(songs_to_download)} new songs out of {len(playlist.songs)} total")
 
             if songs_to_download:
-                playlist_result = downloader.download(songs_to_download, playlist_dir, num_threads=1)
+                playlist_result = downloader.download(songs_to_download, playlist_dir, num_threads=1, progress_callback=progress_callback)
                 result.success_count += playlist_result.success_count
                 result.failure_count += playlist_result.failure_count
                 result.errors.extend(playlist_result.errors)
             else:
                 result.skipped_count += len(playlist.songs)
 
+        if downloader.is_cancelled():
+            result.cancelled = True
         return result
 
 # class AppleMusicLibrary(LibrarySyncSource):
