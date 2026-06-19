@@ -7,6 +7,30 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-19
+
+### Added
+- **`YoutubeDownloader`** (`downloaders/ytdlp.py`) — new primary downloader that calls `yt-dlp` directly instead of `spotdl`:
+  - Searches YouTube with `ytsearch1:{artist} - {title}` per track
+  - Forces HLS/m3u8 format (`bestaudio[protocol=m3u8_native]/…`) which works where DASH formats return HTTP 403
+  - Reads Firefox cookies via `--cookies-from-browser firefox` (avoids Windows DPAPI encryption that blocks Chrome/Edge)
+  - Uses Node.js + EJS challenge solver (`--remote-components ejs:github`) for YouTube's JS challenges
+  - Output filename includes the Spotify track ID so existing deduplication logic (`[trackid].mp3`) continues to work
+- **Real-time terminal output pane** in `SyncWindow`: a `QPlainTextEdit` below the progress bar streams each `yt-dlp` output line as it arrives, auto-scrolling to the latest entry
+- **Progress bar** and **Cancel button** in `SyncWindow` — the UI no longer freezes during sync
+- `audio_providers` setting in `config.ini` / Options window (kept for spotdl compatibility)
+- `SyncResult.cancelled` flag; summary prefixed with "Sync cancelled." when set
+
+### Changed
+- Workers (`SyncSongsWorker`, `SyncPlaylistsWorker`) now use `YoutubeDownloader` instead of `SpotifyDownloader`
+- `download_songs_batch` reads subprocess stdout line-by-line (real-time) instead of waiting for `communicate()` to return
+- Log pane appears during sync and hides after the summary dialog
+
+### Fixed
+- Download failures caused by `spotdl`'s `filter_results` rejecting all YouTube search results
+- HTTP 403 on DASH audio formats (`251`/`140`) — resolved by switching to HLS streams
+- yt-dlp updated from 2025-12-08 to 2026-06-09 (fixes YouTube SABR streaming changes)
+
 ## [0.4.0] - 2026-03-31
 
 ### Added

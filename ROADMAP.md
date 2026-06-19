@@ -4,17 +4,14 @@ Planned improvements, roughly ordered by priority. Items move to CHANGELOG.md wh
 
 ## Near term
 
-### Download progress UI
-Currently the sync window shows no progress while a batch is running. Add a progress bar and a live log/status label fed by signals from the worker threads.
-
 ### Retry failed downloads
 After a batch finishes, surface a "Retry failed" button in the result dialog that re-queues only the tracks that errored.
 
 ### Genre metadata
 `Song.from_spotify_track()` leaves `genres` empty because the Spotify track endpoint doesn't include genres. Fix by making a secondary call to the album or artist endpoint (already fetched in parallel metadata pass) and merging genres back into the `Song`.
 
-### yt-dlp fallback
-`downloaders/ytdl.py` exists but is not wired up. Activate it as a fallback when `spotdl` cannot find a track.
+### Browser selector in Options
+`YoutubeDownloader` currently hardcodes Firefox for cookie extraction (Chrome/Edge are blocked by Windows DPAPI). Add a browser dropdown in Options so users can pick whichever browser they're logged into YouTube with.
 
 ## Medium term
 

@@ -1,14 +1,20 @@
 # music-lib-sync
 
-A desktop app for syncing your Spotify library (saved tracks and playlists) to a local folder as MP3/FLAC/other audio files.
+A desktop app for syncing your Spotify library (saved tracks and playlists) to a local folder as MP3 files.
 
 ## Requirements
 
 - Python 3.10+
-- [spotdl](https://github.com/spotDL/spotify-downloader) (`pip install spotdl`)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — installed via `requirements.txt`
+- [Node.js](https://nodejs.org/) (v18+) — required for YouTube's JS challenge solver
+- **Firefox** logged into YouTube — cookies are read directly from your Firefox profile
 - A [Spotify Developer](https://developer.spotify.com/dashboard) app with:
   - Client ID and Client Secret
   - Redirect URI set to `http://127.0.0.1:8888/callback`
+
+> **Note on browsers:** yt-dlp reads YouTube cookies from Firefox by default.
+> Chrome and Edge use Windows DPAPI encryption that prevents subprocess access to cookies.
+> If you primarily use Chrome/Edge, keep Firefox installed and log into YouTube there once.
 
 ## Installation
 
@@ -29,8 +35,7 @@ Edit `config.ini`:
 ```ini
 [Settings]
 download_path = C:\Users\you\Music\downloads
-cookies_file =
-audio_format = mp3
+audio_format  = mp3
 
 [Spotify]
 client_id     = YOUR_CLIENT_ID
@@ -39,7 +44,6 @@ redirect_uri  = http://127.0.0.1:8888/callback
 ```
 
 - **`download_path`** — where audio files are saved (default: `~/Music/downloads`)
-- **`cookies_file`** — optional path to a `cookies.txt` (Netscape format) for age-restricted content
 - **`audio_format`** — output format: `mp3`, `flac`, `m4a`, `opus`, `ogg`, or `wav`
 
 You can also change these at runtime via the **Options** button in the app.
@@ -58,9 +62,11 @@ On first launch a browser window opens for Spotify OAuth. After authorizing, the
 2. On the sync screen:
    - **Sync Songs** — downloads all your saved/liked tracks.
    - **Sync Playlists** — downloads every playlist in your library.
-   - **Options** — change download path, cookies file, and audio format.
-3. Already-downloaded tracks are skipped automatically (detected by Spotify track ID).
-4. A summary dialog appears when sync finishes, listing successes, skips, and any errors.
+   - **Options** — change download path and audio format.
+   - **Cancel** — stops the current sync; re-running sync later picks up where it left off (already-downloaded tracks are skipped).
+3. A progress bar and live terminal output pane appear during sync, showing each `yt-dlp` line in real time.
+4. Already-downloaded tracks are skipped automatically (detected by Spotify track ID embedded in the filename).
+5. A summary dialog appears when sync finishes, listing successes, skips, and any errors.
 
 ## Logs
 
