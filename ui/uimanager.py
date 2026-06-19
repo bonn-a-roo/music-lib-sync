@@ -1,6 +1,7 @@
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
-    QLineEdit, QHBoxLayout, QProgressBar
+    QLineEdit, QHBoxLayout, QProgressBar, QPlainTextEdit
 
 from model.session_manager import SessionManager
 from utils import configutils
@@ -123,6 +124,13 @@ class SyncWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self.cancel_sync)
 
+        self.log_output = QPlainTextEdit(self)
+        self.log_output.setReadOnly(True)
+        self.log_output.setFont(QFont("Consolas", 8))
+        self.log_output.setMinimumHeight(120)
+        self.log_output.setMaximumHeight(200)
+        self.log_output.setVisible(False)
+
         layout = QVBoxLayout()
         layout.addWidget(self.sync_songs_button)
         layout.addWidget(self.sync_playlists_button)
@@ -130,6 +138,7 @@ class SyncWindow(QWidget):
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
         layout.addWidget(self.cancel_button)
+        layout.addWidget(self.log_output)
 
         self.setLayout(layout)
 
@@ -144,6 +153,7 @@ class SyncWindow(QWidget):
         self.sync_thread = worker
         self.sync_thread.result_ready.connect(self.on_sync_finished)
         self.sync_thread.progress.connect(self.on_progress)
+        self.sync_thread.log_line.connect(self.append_log)
 
         self.progress_bar.setMaximum(0)
         self.progress_bar.setValue(0)
@@ -153,6 +163,8 @@ class SyncWindow(QWidget):
         self.cancel_button.setText("Cancel")
         self.cancel_button.setEnabled(True)
         self.cancel_button.setVisible(True)
+        self.log_output.clear()
+        self.log_output.setVisible(True)
 
         self.sync_thread.start()
 
@@ -167,6 +179,11 @@ class SyncWindow(QWidget):
         self.cancel_button.setText("Cancelling...")
         if self.sync_thread:
             self.sync_thread.cancel()
+
+    def append_log(self, line: str):
+        self.log_output.appendPlainText(line)
+        sb = self.log_output.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def on_progress(self, current: int, total: int, name: str):
         if total > 0:
@@ -184,6 +201,7 @@ class SyncWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.cancel_button.setText("Cancel")
         self.cancel_button.setEnabled(True)
+        self.log_output.setVisible(False)
 
         if result.cancelled:
             msg = result.get_summary() + "\n\nRun sync again to continue where you left off."
@@ -202,6 +220,7 @@ class SyncWindow(QWidget):
 class SyncSongsWorker(QThread):
     result_ready = pyqtSignal(object)
     progress = pyqtSignal(int, int, str)
+    log_line = pyqtSignal(str)
 
     def __init__(self, selected_user):
         super().__init__()
@@ -213,13 +232,9 @@ class SyncSongsWorker(QThread):
             self._downloader.cancel()
 
     def run(self):
-        from utils import configutils
-        from downloaders.spotifydl import SpotifyDownloader
-        self._downloader = SpotifyDownloader(
-            cookies=configutils.get_cookies_file() or None,
-            client_id=configutils.get_spotify_client_id(),
-            client_secret=configutils.get_spotify_client_secret(),
-        )
+        from downloaders.ytdlp import YoutubeDownloader
+        self._downloader = YoutubeDownloader()
+        self._downloader.log_callback = lambda line: self.log_line.emit(line)
         def _progress(current, total, name):
             self.progress.emit(current, total, name)
         result = self.selected_user.library.sync_songs(
@@ -232,6 +247,7 @@ class SyncSongsWorker(QThread):
 class SyncPlaylistsWorker(QThread):
     result_ready = pyqtSignal(object)
     progress = pyqtSignal(int, int, str)
+    log_line = pyqtSignal(str)
 
     def __init__(self, selected_user):
         super().__init__()
@@ -243,13 +259,9 @@ class SyncPlaylistsWorker(QThread):
             self._downloader.cancel()
 
     def run(self):
-        from utils import configutils
-        from downloaders.spotifydl import SpotifyDownloader
-        self._downloader = SpotifyDownloader(
-            cookies=configutils.get_cookies_file() or None,
-            client_id=configutils.get_spotify_client_id(),
-            client_secret=configutils.get_spotify_client_secret(),
-        )
+        from downloaders.ytdlp import YoutubeDownloader
+        self._downloader = YoutubeDownloader()
+        self._downloader.log_callback = lambda line: self.log_line.emit(line)
         def _progress(current, total, name):
             self.progress.emit(current, total, name)
         result = self.selected_user.library.sync_playlists(
