@@ -3,12 +3,18 @@ Tests for song metadata functionality.
 
 These tests cover:
 1. Extended Song model with full metadata fields
-2. Metadata extraction from Spotify API responses
-3. Metadata embedding into MP3 files
+2. Native metadata embedding and reading across supported audio formats
+3. Duration, art caching, and metadata sidecar export
 """
+import json
+import wave
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
+from mutagen.id3 import ID3, TIT2, TRCK, TPOS
+from model.song import Song
+from utils import metadatautils
 import pytest
-from unittest.mock import MagicMock, patch, mock_open
-import os
 
 
 # =============================================================================
@@ -317,464 +323,203 @@ class TestSongMetadata:
 
 
 # =============================================================================
-# TESTS FOR METADATA EXTRACTION FROM SPOTIFY API
-# =============================================================================
-
-class TestSpotifyMetadataExtraction:
-    """Tests for extracting full metadata from Spotify API responses."""
-
-    @pytest.mark.unit
-    def test_get_saved_tracks_extracts_full_metadata(self):
-        """Test that get_saved_tracks extracts all available metadata."""
-        from model.library import SpotifyLibrary
-
-        mock_auth = MagicMock()
-        # Use side_effect to simulate Spotify API pagination (first page has items, second is empty)
-        mock_auth.current_user_saved_tracks.side_effect = [
-            {
-                'items': [{
-                    'track': {
-                        'id': 'track123',
-                        'name': 'Test Track',
-                        'artists': [
-                            {'name': 'Main Artist', 'id': 'artist1'},
-                            {'name': 'Featured', 'id': 'artist2'}
-                        ],
-                        'album': {
-                            'id': 'album123',
-                            'name': 'Test Album',
-                            'album_type': 'album',
-                            'release_date': '2023-05-20',
-                            'images': [{'url': 'https://image.url', 'height': 640}],
-                            'label': 'Test Label',
-                            'copyrights': [{'text': '© 2023 Test', 'type': 'C'}]
-                        },
-                        'external_urls': {'spotify': 'https://open.spotify.com/track/track123'},
-                        'external_ids': {'isrc': 'USTEST123456'},
-                        'duration_ms': 240000,
-                        'track_number': 3,
-                        'disc_number': 1,
-                        'explicit': True,
-                        'popularity': 72
-                    }
-                }]
-            },
-            {'items': []}  # Simulate end of pagination
-        ]
-
-        library = SpotifyLibrary(mock_auth)
-        songs = library.get_saved_tracks()
-
-        assert len(songs) == 1
-        song = songs[0]
-
-        # Verify all metadata was extracted
-        assert song.track_id == 'track123'
-        assert song.name == 'Test Track'
-        assert song.artist == 'Main Artist'
-        assert song.all_artists == ['Main Artist', 'Featured']
-        assert song.album == 'Test Album'
-        assert song.album_id == 'album123'
-        assert song.album_type == 'album'
-        assert song.release_date == '2023-05-20'
-        assert song.album_art_url == 'https://image.url'
-        assert song.duration_ms == 240000
-        assert song.track_number == 3
-        assert song.disc_number == 1
-        assert song.isrc == 'USTEST123456'
-        assert song.explicit is True
-        assert song.popularity == 72
-        assert song.label == 'Test Label'
-
-    @pytest.mark.unit
-    def test_get_playlist_songs_extracts_full_metadata(self):
-        """Test that _get_playlist_songs extracts all available metadata."""
-        from model.library import SpotifyLibrary
-
-        mock_auth = MagicMock()
-        # Use side_effect to simulate Spotify API pagination (first page has items, second is empty)
-        mock_auth.playlist_items.side_effect = [
-            {
-                'items': [{
-                    'track': {
-                        'id': 'playlisttrack1',
-                        'name': 'Playlist Song',
-                        'artists': [{'name': 'Playlist Artist', 'id': 'pa1'}],
-                        'album': {
-                            'id': 'palbum1',
-                            'name': 'Playlist Album',
-                            'album_type': 'single',
-                            'release_date': '2024-01-10',
-                            'images': [{'url': 'https://playlist.image', 'height': 640}]
-                        },
-                        'external_urls': {'spotify': 'https://open.spotify.com/track/playlisttrack1'},
-                        'external_ids': {'isrc': 'USPLAY123456'},
-                        'duration_ms': 195000,
-                        'track_number': 1,
-                        'disc_number': 1,
-                        'explicit': False,
-                        'popularity': 88
-                    }
-                }]
-            },
-            {'items': []}  # Simulate end of pagination
-        ]
-
-        library = SpotifyLibrary(mock_auth)
-        songs = library._get_playlist_songs('playlist123')
-
-        assert len(songs) == 1
-        song = songs[0]
-        assert song.album == 'Playlist Album'
-        assert song.isrc == 'USPLAY123456'
-        assert song.duration_ms == 195000
-
-    @pytest.mark.unit
-    def test_metadata_extraction_handles_none_track(self):
-        """Test that metadata extraction handles None/unavailable tracks."""
-        from model.library import SpotifyLibrary
-
-        mock_auth = MagicMock()
-        # Use side_effect to simulate pagination ending
-        mock_auth.playlist_items.side_effect = [
-            {
-                'items': [
-                    {'track': None},  # Unavailable track
-                    {
-                        'track': {
-                            'id': 'valid1',
-                            'name': 'Valid Song',
-                            'artists': [{'name': 'Artist', 'id': 'a1'}],
-                            'album': {
-                                'id': 'al1',
-                                'name': 'Album',
-                                'album_type': 'album',
-                                'release_date': '2023-01-01',
-                                'images': []
-                            },
-                            'external_urls': {'spotify': 'https://spotify.com/track/valid1'},
-                            'duration_ms': 180000,
-                            'track_number': 1,
-                            'disc_number': 1,
-                            'explicit': False,
-                            'popularity': 50
-                        }
-                    }
-                ]
-            },
-            {'items': []}  # End pagination
-        ]
-
-        library = SpotifyLibrary(mock_auth)
-        songs = library._get_playlist_songs('test_playlist')
-
-        assert len(songs) == 1
-        assert songs[0].name == 'Valid Song'
-
-
-# =============================================================================
 # TESTS FOR METADATA EMBEDDING IN MP3 FILES
 # =============================================================================
 
-class TestMetadataEmbedding:
-    """Tests for embedding metadata into downloaded MP3 files."""
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.TIT2')
-    @patch('utils.metadatautils.TPE1')
-    @patch('utils.metadatautils.TALB')
-    @patch('utils.metadatautils.TRCK')
-    @patch('utils.metadatautils.TDRC')
-    @patch('utils.metadatautils.mutagen')
-    def test_embed_metadata_basic_tags(self, mock_mutagen, mock_tdrc, mock_trck, mock_talb, mock_tpe1, mock_tit2):
-        """Test embedding basic metadata tags into an MP3 file."""
-        from utils.metadatautils import embed_metadata
-        from model.song import Song
-
-        mock_mp3 = MagicMock()
-        mock_mutagen.mp3.MP3.return_value = mock_mp3
-        mock_mutagen.id3.ID3.return_value = MagicMock()
-
-        song = Song(
-            name="Test Song",
-            artist="Test Artist",
-            album="Test Album",
-            track_number=5,
-            release_date="2023-06-15"
-        )
-
-        result = embed_metadata("/path/to/song.mp3", song)
-
-        assert result is True
-        mock_mutagen.mp3.MP3.assert_called_once_with("/path/to/song.mp3")
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.APIC')
-    @patch('utils.metadatautils.TIT2')
-    @patch('utils.metadatautils.TPE1')
-    @patch('utils.metadatautils.mutagen')
-    def test_embed_metadata_with_album_art(self, mock_mutagen, mock_tpe1, mock_tit2, mock_apic):
-        """Test embedding album art into an MP3 file."""
-        from utils.metadatautils import embed_metadata
-        from model.song import Song
-
-        mock_mp3 = MagicMock()
-        mock_mutagen.mp3.MP3.return_value = mock_mp3
-
-        song = Song(
-            name="Test Song",
-            artist="Test Artist",
-            album_art_url="https://i.scdn.co/image/test"
-        )
-
-        with patch('utils.metadatautils.requests.get') as mock_get:
-            mock_get.return_value.content = b'fake_image_data'
-            mock_get.return_value.status_code = 200
-
-            result = embed_metadata("/path/to/song.mp3", song, embed_art=True)
-
-            assert result is True
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.mutagen')
-    def test_embed_metadata_handles_missing_file(self, mock_mutagen):
-        """Test that embed_metadata handles missing file gracefully."""
-        from utils.metadatautils import embed_metadata
-        from model.song import Song
-
-        mock_mutagen.mp3.MP3.side_effect = FileNotFoundError("File not found")
-
-        song = Song(name="Test", artist="Artist")
-
-        result = embed_metadata("/nonexistent/path.mp3", song)
-
-        assert result is False
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.mutagen')
-    def test_embed_metadata_handles_corrupt_file(self, mock_mutagen):
-        """Test that embed_metadata handles corrupt MP3 files."""
-        from utils.metadatautils import embed_metadata
-        from model.song import Song
-
-        mock_mutagen.mp3.MP3.side_effect = Exception("Invalid MP3 file")
-
-        song = Song(name="Test", artist="Artist")
-
-        result = embed_metadata("/corrupt/file.mp3", song)
-
-        assert result is False
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.mutagen')
-    def test_read_metadata_from_mp3(self, mock_mutagen):
-        """Test reading existing metadata from an MP3 file."""
-        from utils.metadatautils import read_metadata
-
-        # Create a mock MP3 instance with tags
-        mock_mp3_instance = MagicMock()
-        mock_tags = {
-            'TIT2': MagicMock(text=['Song Title']),
-            'TPE1': MagicMock(text=['Artist Name']),
-            'TALB': MagicMock(text=['Album Name']),
-            'TRCK': MagicMock(text=['5/12']),
-            'TDRC': MagicMock(text=['2023'])
-        }
-        mock_mp3_instance.tags = mock_tags
-        mock_mutagen.mp3.MP3.return_value = mock_mp3_instance
-
-        metadata = read_metadata("/path/to/song.mp3")
-
-        assert metadata['title'] == 'Song Title'
-        assert metadata['artist'] == 'Artist Name'
-        assert metadata['album'] == 'Album Name'
-
-    @pytest.mark.unit
-    def test_verify_metadata_completeness(self):
-        """Test verifying that all expected metadata is present in a file."""
-        from utils.metadatautils import verify_metadata
-        from model.song import Song
-
-        song = Song(
-            name="Test Song",
-            artist="Test Artist",
-            album="Test Album",
-            track_number=5,
-            isrc="USTEST123456"
-        )
-
-        with patch('utils.metadatautils.read_metadata') as mock_read:
-            mock_read.return_value = {
-                'title': 'Test Song',
-                'artist': 'Test Artist',
-                'album': 'Test Album',
-                'track_number': 5,
-                'isrc': 'USTEST123456'
-            }
-
-            is_complete, missing = verify_metadata("/path/to/song.mp3", song)
-
-            assert is_complete is True
-            assert len(missing) == 0
-
-    @pytest.mark.unit
-    def test_verify_metadata_reports_missing_fields(self):
-        """Test that verify_metadata reports missing fields."""
-        from utils.metadatautils import verify_metadata
-        from model.song import Song
-
-        song = Song(
-            name="Test Song",
-            artist="Test Artist",
-            album="Test Album",
-            isrc="USTEST123456"
-        )
-
-        with patch('utils.metadatautils.read_metadata') as mock_read:
-            mock_read.return_value = {
-                'title': 'Test Song',
-                'artist': 'Test Artist'
-                # Missing: album, isrc
-            }
-
-            is_complete, missing = verify_metadata("/path/to/song.mp3", song)
-
-            assert is_complete is False
-            assert 'album' in missing
-            assert 'isrc' in missing
-
-
-# =============================================================================
-# TESTS FOR METADATA JSON EXPORT
-# =============================================================================
-
-class TestMetadataExport:
-    """Tests for exporting metadata to JSON files."""
-
-    @pytest.mark.unit
-    def test_export_song_metadata_to_json(self):
-        """Test exporting song metadata to a JSON sidecar file."""
-        from utils.metadatautils import export_metadata_to_json
-        from model.song import Song
-        import json
-
-        song = Song(
-            name="Test Song",
-            artist="Test Artist",
-            album="Test Album",
-            track_id="track123",
-            isrc="USTEST123456",
-            duration_ms=240000
-        )
-
-        with patch('builtins.open', mock_open()) as mock_file:
-            result = export_metadata_to_json(song, "/path/to/song.mp3")
-
-            assert result is True
-            mock_file.assert_called_once_with("/path/to/song.json", 'w', encoding='utf-8')
-
-    @pytest.mark.unit
-    def test_export_playlist_metadata_to_json(self):
-        """Test exporting entire playlist metadata to JSON."""
-        from utils.metadatautils import export_playlist_metadata
-        from model.song import Song
-        from model.playlist import Playlist
-
-        songs = [
-            Song(name="Song 1", artist="Artist 1", track_id="t1"),
-            Song(name="Song 2", artist="Artist 2", track_id="t2")
-        ]
-        playlist = Playlist(name="Test Playlist", songs=songs, url="https://spotify.com/playlist/test")
-
-        with patch('builtins.open', mock_open()) as mock_file:
-            result = export_playlist_metadata(playlist, "/download/path")
-
-            assert result is True
-
-    @pytest.mark.unit
-    def test_import_metadata_from_json(self):
-        """Test importing song metadata from a JSON file."""
-        from utils.metadatautils import import_metadata_from_json
-        import json
-
-        json_content = json.dumps({
-            'name': 'Test Song',
-            'artist': 'Test Artist',
-            'album': 'Test Album',
-            'track_id': 'track123',
-            'isrc': 'USTEST123456'
-        })
-
-        with patch('builtins.open', mock_open(read_data=json_content)):
-            with patch('os.path.exists', return_value=True):
-                song = import_metadata_from_json("/path/to/song.json")
-
-                assert song.name == 'Test Song'
-                assert song.artist == 'Test Artist'
-                assert song.track_id == 'track123'
-
-
-# =============================================================================
-# TESTS FOR BATCH METADATA OPERATIONS
-# =============================================================================
-
-class TestBatchMetadataOperations:
-    """Tests for batch metadata processing operations."""
-
-    @pytest.mark.unit
-    def test_batch_embed_metadata(self):
-        """Test embedding metadata for multiple files."""
-        from utils.metadatautils import batch_embed_metadata
-        from model.song import Song
-
-        songs = [
-            Song(name="Song 1", artist="Artist 1", track_id="t1"),
-            Song(name="Song 2", artist="Artist 2", track_id="t2"),
-            Song(name="Song 3", artist="Artist 3", track_id="t3")
-        ]
-
-        file_mappings = {
-            "t1": "/path/to/song1.mp3",
-            "t2": "/path/to/song2.mp3",
-            "t3": "/path/to/song3.mp3"
-        }
-
-        with patch('utils.metadatautils.embed_metadata') as mock_embed:
-            mock_embed.return_value = True
-
-            results = batch_embed_metadata(songs, file_mappings)
-
-            assert results['success'] == 3
-            assert results['failed'] == 0
-            assert mock_embed.call_count == 3
-
-    @pytest.mark.unit
-    @patch('utils.metadatautils.os.path.exists')
-    @patch('utils.metadatautils.os.listdir')
-    @patch('utils.metadatautils.verify_metadata')
-    def test_batch_verify_metadata(self, mock_verify, mock_listdir, mock_exists):
-        """Test verifying metadata for multiple files."""
-        from utils.metadatautils import batch_verify_metadata
-        from model.song import Song
-
-        # Mock directory exists and return fake files that match track_ids
-        mock_exists.return_value = True
-        mock_listdir.return_value = ['track1.mp3', 'track2.mp3']
-
-        # Create songs with track_ids that match the fake files
-        songs = [
-            Song(name="Song 1", artist="Artist 1", track_id="track1"),
-            Song(name="Song 2", artist="Artist 2", track_id="track2")
-        ]
-
-        # Mock verify_metadata to return different results
-        mock_verify.side_effect = [
-            (True, []),
-            (False, ['album', 'isrc'])
-        ]
-
-        results = batch_verify_metadata(songs, "/path/to/files")
-
-        assert results['complete'] == 1
-        assert results['incomplete'] == 1
-        assert 'Song 2' in str(results['missing_fields'])
+
+
+@pytest.fixture
+def minimal_mp3(tmp_path):
+    path = tmp_path / 'silent.mp3'
+    # Ten complete MPEG-1 Layer III frames: 128 kbps, 44.1 kHz.
+    path.write_bytes((b'\xff\xfb\x90\x64' + bytes(413)) * 10)
+    return path
+
+
+@pytest.mark.unit
+def test_real_mp3_roundtrip_year_and_duration(minimal_mp3):
+    song = Song(name='中文 Zażółć', artist='Москва', album='Album',
+                release_date='2023-06-15', track_number=5, disc_number=2,
+                isrc='USTEST123456')
+    assert not metadatautils.has_basic_tags(str(minimal_mp3))
+    assert metadatautils.read_duration(str(minimal_mp3)) == pytest.approx(4170 * 8 / 128000)
+    assert metadatautils.embed_metadata(str(minimal_mp3), song)
+    assert ID3(minimal_mp3).version == (2, 3, 0)
+    metadata = metadatautils.read_metadata(str(minimal_mp3))
+    assert metadata['title'] == song.name
+    assert metadata['artist'] == song.artist
+    assert metadata['date'].startswith('2023')
+    assert metadata['track_number'] == 5 and metadata['disc_number'] == 2
+    assert metadatautils.has_basic_tags(str(minimal_mp3))
+    assert metadatautils.verify_metadata(str(minimal_mp3), song) == (True, [])
+
+
+@pytest.mark.unit
+def test_bad_numeric_frames_do_not_discard_other_metadata(minimal_mp3):
+    song = Song(name='Kept', artist='Artist', album='Album', release_date='1999')
+    assert metadatautils.embed_metadata(str(minimal_mp3), song)
+    tags = ID3(minimal_mp3)
+    tags.add(TRCK(encoding=3, text='not a number'))
+    tags.add(TPOS(encoding=3, text='unknown'))
+    tags.save(minimal_mp3)
+    metadata = metadatautils.read_metadata(str(minimal_mp3))
+    assert metadata['title'] == 'Kept'
+    assert metadata['date'] == '1999'
+    assert 'track_number' not in metadata and 'disc_number' not in metadata
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('data,mime', [
+    (b'\x89PNG\r\n\x1a\nimage', 'image/png'),
+    (b'\xff\xd8\xffimage', 'image/jpeg'),
+])
+def test_album_art_cached_across_threads_and_mime_sniffed(tmp_path, monkeypatch, data, mime):
+    metadatautils._art_cache.clear()
+    calls = []
+    def fetch(url, timeout):
+        calls.append((url, timeout))
+        return SimpleNamespace(content=data, headers={'Content-Type': 'image/jpeg'},
+                               raise_for_status=lambda: None)
+    monkeypatch.setattr(metadatautils.requests, 'get', fetch)
+    paths = [tmp_path / f'{index}.mp3' for index in range(8)]
+    for path in paths:
+        path.write_bytes((b'\xff\xfb\x90\x64' + bytes(413)) * 10)
+    song = Song(name='Album song', artist='Artist', album_art_url='https://art.invalid/album')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda path: metadatautils.embed_metadata(str(path), song, True), paths))
+    assert results == [True] * 8
+    assert calls == [('https://art.invalid/album', 10)]
+    for path in paths:
+        art = ID3(path).getall('APIC')[0]
+        assert art.mime == mime and art.data == data
+
+
+@pytest.mark.unit
+def test_album_art_failure_does_not_fail_tags(minimal_mp3, monkeypatch):
+    def fail(*args, **kwargs):
+        raise metadatautils.requests.Timeout('offline')
+    monkeypatch.setattr(metadatautils.requests, 'get', fail)
+    song = Song(name='Kept', artist='Artist', album_art_url='https://art.invalid/failure')
+    assert metadatautils.embed_metadata(str(minimal_mp3), song, True)
+    assert metadatautils.read_metadata(str(minimal_mp3))['title'] == 'Kept'
+
+
+@pytest.mark.unit
+def test_art_cache_is_bounded(monkeypatch):
+    metadatautils._art_cache.clear()
+    monkeypatch.setattr(metadatautils.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        content=b'\xff\xd8\xffimage', headers={}, raise_for_status=lambda: None))
+    for index in range(70):
+        metadatautils._get_album_art(f'https://art.invalid/{index}')
+    assert len(metadatautils._art_cache) == 64
+    assert 'https://art.invalid/0' not in metadatautils._art_cache
+    assert 'https://art.invalid/69' in metadatautils._art_cache
+
+
+@pytest.mark.unit
+def test_wav_native_id3_roundtrip(tmp_path):
+    path = tmp_path / 'silent.wav'
+    with wave.open(str(path), 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(bytes(16000))
+    song = Song(name='WAV title', artist='Artist', release_date='2001')
+    assert metadatautils.read_duration(str(path)) == pytest.approx(1.0)
+    assert not metadatautils.has_basic_tags(str(path))
+    assert metadatautils.embed_metadata(str(path), song)
+    assert metadatautils.has_basic_tags(str(path))
+    assert metadatautils.read_metadata(str(path))['date'] == '2001'
+
+
+@pytest.mark.unit
+def test_missing_and_corrupt_audio_return_safe_results(tmp_path):
+    song = Song(name='Title', artist='Artist')
+    missing = tmp_path / 'missing.mp3'
+    corrupt = tmp_path / 'corrupt.mp3'
+    corrupt.write_bytes(b'not audio')
+    for path in (missing, corrupt):
+        assert metadatautils.read_duration(str(path)) is None
+        assert not metadatautils.has_basic_tags(str(path))
+        assert not metadatautils.embed_metadata(str(path), song)
+        assert metadatautils.read_metadata(str(path)) == {}
+
+
+@pytest.mark.unit
+def test_basic_tags_requires_both_frames(minimal_mp3):
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text='Title only'))
+    tags.save(minimal_mp3)
+    assert not metadatautils.has_basic_tags(str(minimal_mp3))
+
+
+@pytest.mark.unit
+def test_json_sidecar_roundtrip_uses_actual_extension(tmp_path):
+    song = Song(name='中文', artist='Artist', track_id='track123', album='Album', isrc='ISRC')
+    audio_path = tmp_path / 'directory.mp3.MP3'
+    assert metadatautils.export_metadata_to_json(song, str(audio_path))
+    sidecar = tmp_path / 'directory.mp3.json'
+    assert json.loads(sidecar.read_text(encoding='utf-8'))['name'] == '中文'
+    restored = metadatautils.import_metadata_from_json(str(sidecar))
+    assert restored.name == song.name and restored.track_id == song.track_id
+    assert restored.isrc == 'ISRC'
+
+
+@pytest.mark.unit
+def test_playlist_export_sanitizes_reserved_component(tmp_path):
+    from model.playlist import Playlist
+    playlist = Playlist(name='CON', songs=[Song(name='Title', artist='Artist')], url='playlist')
+    assert metadatautils.export_playlist_metadata(playlist, str(tmp_path))
+    assert json.loads((tmp_path / '_CON.json').read_text(encoding='utf-8'))['name'] == 'CON'
+
+
+@pytest.mark.unit
+def test_batch_embed_missing_mapping_and_verify_real_files(minimal_mp3):
+    song = Song(name='Title', artist='Artist', track_id='track1')
+    missing = Song(name='Missing', artist='Artist', track_id='track2')
+    path = minimal_mp3.with_name('Title [track1].mp3')
+    minimal_mp3.rename(path)
+    result = metadatautils.batch_embed_metadata([song, missing], {'track1': str(path)})
+    assert result['success'] == 1 and result['failed'] == 1
+    verified = metadatautils.batch_verify_metadata([song, missing], str(path.parent))
+    assert verified['complete'] == 1 and verified['incomplete'] == 1
+    assert verified['missing_fields']['Missing'] == ['File not found']
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('extension', ['flac', 'm4a', 'opus', 'ogg'])
+def test_native_audio_roundtrip_with_art(tmp_path, monkeypatch, extension):
+    import shutil
+    import subprocess
+    import mutagen
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        pytest.skip('ffmpeg external runtime requirement not installed')
+    path = tmp_path / f'silent.{extension}'
+    subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                    '-i', 'anullsrc=r=44100:cl=stereo', '-t', '0.5', str(path)],
+                   check=True, capture_output=True, timeout=30)
+    image = b'\x89PNG\r\n\x1a\nimage'
+    monkeypatch.setattr(metadatautils.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        content=image, headers={}, raise_for_status=lambda: None))
+    song = Song(name='中文', artist='Москва', album='Album', track_number=4, disc_number=2,
+                release_date='2001-02-03', isrc='USTEST123456',
+                album_art_url=f'https://art.invalid/{extension}')
+    assert not metadatautils.has_basic_tags(str(path))
+    assert metadatautils.embed_metadata(str(path), song, True)
+    assert metadatautils.has_basic_tags(str(path))
+    data = metadatautils.read_metadata(str(path))
+    assert data['title'] == song.name and data['artist'] == song.artist
+    assert data['date'] == '2001-02-03' and data['isrc'] == song.isrc
+    assert data['track_number'] == 4 and data['disc_number'] == 2
+    assert 0.45 < metadatautils.read_duration(str(path)) < 0.7
+    audio = mutagen.File(path)
+    if extension == 'flac':
+        assert audio.pictures[0].mime == 'image/png' and audio.pictures[0].data == image
+    elif extension == 'm4a':
+        assert bytes(audio.tags['covr'][0]) == image
+        assert audio.tags['covr'][0].imageformat == metadatautils.MP4Cover.FORMAT_PNG
+    else:
+        picture = metadatautils.Picture(metadatautils.base64.b64decode(
+            audio.tags['metadata_block_picture'][0]))
+        assert picture.mime == 'image/png' and picture.data == image

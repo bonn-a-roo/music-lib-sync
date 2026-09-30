@@ -10,25 +10,82 @@ This module provides functions for:
 """
 import json
 import os
+from collections import OrderedDict
+import threading
 from typing import Optional
 
 try:
     import mutagen.mp3
-    from mutagen.id3 import ID3, TIT2, TPE1, TALB, TRCK, TPOS, TDRC, TSRC, TCON, TYER, TPUB, TCOP, APIC
+    from mutagen.id3 import ID3, TIT2, TPE1, TALB, TRCK, TPOS, TDRC, TSRC, TCON, TPUB, TCOP, APIC
     import mutagen.id3
+    from mutagen.mp4 import MP4, MP4Cover
+    from mutagen.flac import FLAC, Picture
+    import base64
 except ImportError:
     # mutagen not installed - will be handled at runtime
     mutagen = None
 
 import requests
 from utils.logutils import get_logger
+from utils.fileutils import sanitize_path_component
 
 logger = get_logger(__name__)
+
+_art_cache = OrderedDict()
+_art_cache_lock = threading.Lock()
+_ART_CACHE_LIMIT = 64
+
+
+def _get_album_art(url):
+    """Fetch each cached URL once, including concurrent requests for one album."""
+    with _art_cache_lock:
+        if url in _art_cache:
+            _art_cache.move_to_end(url)
+            return _art_cache[url]
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.content
+        if data.startswith(b'\x89PNG\r\n\x1a\n'):
+            mime = 'image/png'
+        elif data.startswith(b'\xff\xd8\xff'):
+            mime = 'image/jpeg'
+        else:
+            mime = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
+            if mime not in ('image/jpeg', 'image/png'):
+                return None
+        _art_cache[url] = (data, mime)
+        if len(_art_cache) > _ART_CACHE_LIMIT:
+            _art_cache.popitem(last=False)
+        return data, mime
+
+
+def read_duration(file_path: str) -> float | None:
+    """Return audio duration in seconds, or None for unreadable audio."""
+    if mutagen is None:
+        return None
+    try:
+        return float(mutagen.File(file_path).info.length)
+    except Exception:
+        return None
+
+
+def has_basic_tags(file_path: str) -> bool:
+    """True iff the file has title and artist tags in its native tag format."""
+    if mutagen is None:
+        return False
+    try:
+        audio = mutagen.File(file_path)
+        tags = audio.tags
+        keys = ('TIT2', 'TPE1') if isinstance(tags, ID3) else (
+            ('\xa9nam', '\xa9ART') if isinstance(audio, MP4) else ('title', 'artist'))
+        return tags is not None and all(key in tags for key in keys)
+    except Exception:
+        return False
 
 
 def embed_metadata(file_path: str, song, embed_art: bool = False) -> bool:
     """
-    Embed song metadata into an MP3 file as ID3 tags.
+    Embed song metadata into supported audio files in their native tag format.
 
     Args:
         file_path: Path to the MP3 file
@@ -43,15 +100,16 @@ def embed_metadata(file_path: str, song, embed_art: bool = False) -> bool:
         return False
 
     try:
-        # Load the MP3 file
-        audio = mutagen.mp3.MP3(file_path)
-
-        # Add ID3 tag if it doesn't exist
+        audio = mutagen.File(file_path)
+        if audio is None:
+            raise ValueError("Unrecognised audio file")
         if audio.tags is None:
-            audio.tags = mutagen.id3.ID3()
+            audio.add_tags()
 
         # Basic metadata
         metadata = song.to_metadata_dict()
+        if not isinstance(audio.tags, ID3):
+            return _embed_native_metadata(audio, metadata, embed_art, song)
 
         if metadata.get('title'):
             audio.tags.add(TIT2(encoding=3, text=metadata['title']))
@@ -67,9 +125,6 @@ def embed_metadata(file_path: str, song, embed_art: bool = False) -> bool:
             audio.tags.add(TPOS(encoding=3, text=disc_str))
         if metadata.get('date'):
             audio.tags.add(TDRC(encoding=3, text=metadata['date']))
-        elif metadata.get('date'):
-            # Also add TYER for older players
-            audio.tags.add(TYER(encoding=3, text=str(metadata['date'][:4])))
         if metadata.get('isrc'):
             audio.tags.add(TSRC(encoding=3, text=metadata['isrc']))
         if metadata.get('genres'):
@@ -84,24 +139,19 @@ def embed_metadata(file_path: str, song, embed_art: bool = False) -> bool:
         # Embed album art if requested and URL is available
         if embed_art and metadata.get('album_art_url'):
             try:
-                response = requests.get(metadata['album_art_url'], timeout=10)
-                if response.status_code == 200:
-                    # Remove existing APIC frames
+                art = _get_album_art(metadata['album_art_url'])
+                if art is not None:
+                    data, mime = art
                     audio.tags.delall("APIC")
-                    # Add new album art
                     audio.tags.add(APIC(
-                        encoding=3,
-                        mime='image/jpeg',
-                        type=3,  # Cover front
-                        desc='Cover',
-                        data=response.content
+                        encoding=3, mime=mime, type=3, desc='Cover', data=data
                     ))
                     logger.debug(f"Embedded album art for {song.name}")
             except Exception as e:
                 logger.warning(f"Failed to download album art for {song.name}: {e}")
 
         # Save the changes
-        audio.save()
+        audio.save(v2_version=3)
         logger.debug(f"Embedded metadata for {song.name} into {file_path}")
         return True
 
@@ -111,6 +161,73 @@ def embed_metadata(file_path: str, song, embed_art: bool = False) -> bool:
     except Exception as e:
         logger.error(f"Failed to embed metadata in {file_path}: {e}")
         return False
+
+
+_NATIVE_KEYS = {
+    'title': ('title', '\xa9nam'), 'artist': ('artist', '\xa9ART'),
+    'album': ('album', '\xa9alb'), 'date': ('date', '\xa9day'),
+    'track_number': ('tracknumber', 'trkn'), 'disc_number': ('discnumber', 'disk'),
+    'isrc': ('isrc', '----:com.apple.iTunes:ISRC'),
+    'genre': ('genre', '\xa9gen'), 'label': ('label', '----:com.apple.iTunes:LABEL'),
+    'copyright': ('copyright', 'cprt'),
+}
+
+
+def _embed_native_metadata(audio, metadata, embed_art, song):
+    mp4 = isinstance(audio, MP4)
+    for field, keys in _NATIVE_KEYS.items():
+        value = metadata.get('genres') if field == 'genre' else metadata.get(field)
+        if not value:
+            continue
+        key = keys[1 if mp4 else 0]
+        if mp4 and field in ('track_number', 'disc_number'):
+            audio.tags[key] = [(int(value), 0)]
+        elif mp4 and key.startswith('----:'):
+            audio.tags[key] = [str(value).encode('utf-8')]
+        else:
+            audio.tags[key] = [str(item) for item in value] if isinstance(value, list) else [str(value)]
+    if embed_art and metadata.get('album_art_url'):
+        try:
+            art = _get_album_art(metadata['album_art_url'])
+            if art is not None:
+                data, mime = art
+                if mp4:
+                    imageformat = MP4Cover.FORMAT_PNG if mime == 'image/png' else MP4Cover.FORMAT_JPEG
+                    audio.tags['covr'] = [MP4Cover(data, imageformat=imageformat)]
+                else:
+                    picture = Picture()
+                    picture.type, picture.mime, picture.desc, picture.data = 3, mime, 'Cover', data
+                    if isinstance(audio, FLAC):
+                        audio.clear_pictures()
+                        audio.add_picture(picture)
+                    else:
+                        audio.tags['metadata_block_picture'] = [
+                            base64.b64encode(picture.write()).decode('ascii')]
+        except Exception as error:
+            logger.warning(f"Failed to download album art for {song.name}: {error}")
+    audio.save()
+    return True
+
+
+def _read_native_metadata(audio):
+    metadata = {}
+    if audio.tags is None:
+        return metadata
+    mp4 = isinstance(audio, MP4)
+    for field, keys in _NATIVE_KEYS.items():
+        values = audio.tags.get(keys[1 if mp4 else 0])
+        if not values:
+            continue
+        value = values[0]
+        if field in ('track_number', 'disc_number'):
+            try:
+                value = int(value[0] if isinstance(value, tuple) else str(value).split('/')[0])
+            except (ValueError, TypeError, IndexError):
+                continue
+        else:
+            value = value.decode('utf-8', errors='replace') if isinstance(value, bytes) else str(value)
+        metadata[field] = value
+    return metadata
 
 
 def read_metadata(file_path: str) -> dict:
@@ -128,8 +245,12 @@ def read_metadata(file_path: str) -> dict:
         return {}
 
     try:
-        audio = mutagen.mp3.MP3(file_path)
+        audio = mutagen.File(file_path)
+        if audio is None:
+            return {}
         metadata = {}
+        if not isinstance(audio.tags, ID3):
+            return _read_native_metadata(audio)
 
         if audio.tags:
             # Map ID3 frames to metadata keys
@@ -152,7 +273,10 @@ def read_metadata(file_path: str) -> dict:
                     # Handle track_number format (e.g., "5/12")
                     value = str(frame.text[0])
                     if key in ('track_number', 'disc_number'):
-                        value = int(value.split('/')[0]) if '/' in value else int(value)
+                        try:
+                            value = int(value.split('/')[0])
+                        except (ValueError, TypeError):
+                            continue
                     metadata[key] = value
 
         return metadata
@@ -209,8 +333,7 @@ def export_metadata_to_json(song, mp3_path: str) -> bool:
         True if successful, False otherwise
     """
     try:
-        # Create JSON path by replacing .mp3 with .json
-        json_path = mp3_path.rsplit('.mp3', 1)[0] + '.json'
+        json_path = os.path.splitext(mp3_path)[0] + '.json'
 
         metadata = {
             'name': song.name,
@@ -277,7 +400,7 @@ def export_playlist_metadata(playlist, download_path: str) -> bool:
             }
             playlist_data['songs'].append(song_data)
 
-        json_path = os.path.join(download_path, f"{sanitize_filename(playlist.name)}.json")
+        json_path = os.path.join(download_path, f"{sanitize_path_component(playlist.name)}.json")
 
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(playlist_data, f, indent=2, ensure_ascii=False)
@@ -406,18 +529,3 @@ def batch_verify_metadata(songs: list, directory: str) -> dict:
     return results
 
 
-def sanitize_filename(name: str) -> str:
-    """
-    Sanitize a filename by removing/replacing invalid characters.
-
-    Args:
-        name: Original filename or string
-
-    Returns:
-        Sanitized string safe for filenames
-    """
-    # Replace invalid characters with underscore
-    invalid_chars = '<>:"/\\|?*'
-    for char in invalid_chars:
-        name = name.replace(char, '_')
-    return name

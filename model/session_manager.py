@@ -16,14 +16,13 @@ class SessionManager:
             self.users = []
             self._initialized = True
 
-    def create_user(self):
-        user = User()
+    def create_user(self, manual_url_provider=None, cancel_event=None):
+        user = User(manual_url_provider=manual_url_provider, cancel_event=cancel_event)
         self.selected_user = user
         self.users.append(user)
+        return user
 
     def get_users(self):
-        if not self.users:
-            self.create_user()
         return self.users
 
     def get_selected_user(self):

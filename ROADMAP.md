@@ -8,10 +8,10 @@ Planned improvements, roughly ordered by priority. Items move to CHANGELOG.md wh
 After a batch finishes, surface a "Retry failed" button in the result dialog that re-queues only the tracks that errored.
 
 ### Genre metadata
-`Song.from_spotify_track()` leaves `genres` empty because the Spotify track endpoint doesn't include genres. Fix by making a secondary call to the album or artist endpoint (already fetched in parallel metadata pass) and merging genres back into the `Song`.
+`Song.from_spotify_track()` leaves `genres` empty because track responses do not include artist genres. Fetch individual artists, cache their genres, and merge them into songs. No album/artist enrichment pass currently exists; Spotify Development Mode no longer supports the batch artist endpoint.
 
 ### Browser selector in Options
-`YoutubeDownloader` currently hardcodes Firefox for cookie extraction (Chrome/Edge are blocked by Windows DPAPI). Add a browser dropdown in Options so users can pick whichever browser they're logged into YouTube with.
+Add a browser dropdown for automatic cookie extraction. Firefox is the default; an explicit cookies file can be selected instead. Browser/profile support depends on yt-dlp and the operating system.
 
 ## Medium term
 

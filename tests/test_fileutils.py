@@ -1,114 +1,113 @@
-"""
-Tests for fileutils.py - File system operations and filename sanitization.
-"""
+"""Tests for utils.fileutils - safe file names and track-id recognition."""
 import os
-import tempfile
-import shutil
-from pathlib import Path
 
 import pytest
 
-from utils.fileutils import create_directory, sanitize_filename
+from utils.fileutils import (
+    create_directory,
+    sanitize_path_component,
+    song_filename,
+    track_id_from_filename,
+)
+
+TRACK_ID = '3ZbQb6icDF34PLQcHOYAkm'
 
 
-class TestSanitizeFilename:
-    """Tests for filename sanitization."""
-
-    @pytest.mark.unit
-    def test_removes_windows_forbidden_characters(self):
-        """Test that Windows forbidden characters are removed."""
-        # < > : " / \ | ? *
-        # Note: First forbidden chars are removed, then non-word chars become underscores
-        # 'file<>name' -> 'filename' (removed) -> 'filename' (no non-word chars)
-        assert sanitize_filename('file<>name') == 'filename'
-        assert sanitize_filename('file:name') == 'filename'  # ':' removed, then 'filename'
-        assert sanitize_filename('file"name') == 'filename'  # '"' removed
-        assert sanitize_filename('file/name') == 'filename'  # '/' removed
-        assert sanitize_filename('file\\name') == 'filename'  # '\' removed
-        assert sanitize_filename('file|name') == 'filename'  # '|' removed
-        assert sanitize_filename('file?name') == 'filename'  # '?' removed
-        assert sanitize_filename('file*name') == 'filename'  # '*' removed
+class TestSanitizePathComponent:
 
     @pytest.mark.unit
-    def test_replaces_non_word_characters_with_underscore(self):
-        """Test that non-word characters are replaced with underscores."""
-        assert sanitize_filename('file name') == 'file_name'
-        assert sanitize_filename('file@name') == 'file_name'
-        assert sanitize_filename('file#name') == 'file_name'
-        assert sanitize_filename('file$name') == 'file_name'
-        assert sanitize_filename('file%name') == 'file_name'
-        assert sanitize_filename('file&name') == 'file_name'
+    @pytest.mark.parametrize('name', [
+        'Rock/Metal', 'What?', 'Night: Drive', 'Mix *2*', 'a\\b', 'x|y', '"quoted"', '<tag>',
+    ])
+    def test_result_is_a_single_legal_windows_component(self, name):
+        result = sanitize_path_component(name)
+        assert not any(c in result for c in '<>:"/\\|?*')
+        assert result and result == result.strip(' .')
 
     @pytest.mark.unit
-    def test_multiple_special_characters_become_single_underscore(self):
-        """Test that consecutive special characters become one underscore."""
-        assert sanitize_filename('file!!!name') == 'file_name'
-        assert sanitize_filename('file   name') == 'file_name'
-        assert sanitize_filename('file@#$name') == 'file_name'
+    def test_slash_in_title_does_not_create_subdirectory(self, tmp_path):
+        target = tmp_path / sanitize_path_component('Tombo in 7/4')
+        target.mkdir()
+        assert [p.name for p in tmp_path.iterdir()] == [target.name]
 
     @pytest.mark.unit
-    def test_preserves_alphanumeric_characters(self):
-        """Test that alphanumeric characters are preserved."""
-        assert sanitize_filename('filename123') == 'filename123'
-        assert sanitize_filename('FileName123') == 'FileName123'
+    def test_unicode_is_preserved(self):
+        assert sanitize_path_component('Motörhead - Łona 宇多田') == 'Motörhead - Łona 宇多田'
 
     @pytest.mark.unit
-    def test_preserves_underscores(self):
-        """Test that underscores are preserved."""
-        assert sanitize_filename('file_name') == 'file_name'
-        assert sanitize_filename('file_name_test') == 'file_name_test'
+    @pytest.mark.parametrize('name', ['CON', 'nul', 'COM1', 'lpt9', 'aux.txt'])
+    def test_reserved_device_names_are_prefixed(self, name):
+        assert sanitize_path_component(name).startswith('_')
 
     @pytest.mark.unit
-    def test_empty_string_returns_empty_string(self):
-        """Test that empty string returns empty string."""
-        assert sanitize_filename('') == ''
+    @pytest.mark.parametrize('name', ['', None, '   ', '...', '?'])
+    def test_never_returns_empty(self, name):
+        assert sanitize_path_component(name)
 
     @pytest.mark.unit
-    def test_real_world_song_titles(self):
-        """Test sanitization of realistic song titles."""
-        # 'Song: Title/Name' -> 'Song TitleName' (forbidden removed) -> 'Song_TitleName' (spaces -> _)
-        assert sanitize_filename('Song: Title/Name') == 'Song_TitleName'
-        # 'Artist "Feat" Other - Song' -> 'Artist Feat Other - Song' -> 'Artist_Feat_Other_Song' (hyphen is non-word)
-        assert sanitize_filename('Artist "Feat" Other - Song') == 'Artist_Feat_Other_Song'
-        # 'Song? (Remix)' -> 'Song (Remix)' -> 'Song_Remix_' (space+paren -> single _)
-        assert sanitize_filename('Song? (Remix)') == 'Song_Remix_'
+    def test_trailing_dots_and_spaces_removed(self):
+        assert sanitize_path_component('Best of 2020. ') == 'Best of 2020'
+
+    @pytest.mark.unit
+    def test_truncates_to_max_len(self):
+        assert len(sanitize_path_component('a' * 500, max_len=50)) <= 50
+
+
+class TestSongFilename:
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize('artist,name', [
+        ('Elliott Smith', 'Kiwi Maddog 20/20 (Version 2)'),
+        ('AC/DC', 'Back In Black'),
+        ('Martha Scanlan', "I'll Think About It / I Could've Loved You"),
+        ('Motörhead', 'Iron Horse / Born to Lose'),
+        ('Artist', 'Song %(title)s'),
+    ])
+    def test_flat_file_that_dedupe_recognises(self, artist, name):
+        filename = song_filename(artist, name, TRACK_ID)
+        assert os.path.basename(filename) == filename
+        assert track_id_from_filename(filename) == TRACK_ID
+
+    @pytest.mark.unit
+    def test_long_titles_keep_the_track_id_suffix(self):
+        filename = song_filename('Grateful Dead', 'Loser - Live at Barton Hall ' * 20, TRACK_ID)
+        assert len(filename) <= 200
+        assert filename.endswith(f' [{TRACK_ID}].mp3')
+
+    @pytest.mark.unit
+    def test_missing_artist_or_title_still_produces_valid_name(self):
+        filename = song_filename(None, None, TRACK_ID)
+        assert track_id_from_filename(filename) == TRACK_ID
+        assert 'None' not in filename
+
+
+class TestTrackIdFromFilename:
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize('ext', ['mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav'])
+    def test_extracts_id_across_supported_formats(self, ext):
+        assert track_id_from_filename(f'Artist - Song [{TRACK_ID}].{ext}') == TRACK_ID
+
+    @pytest.mark.unit
+    def test_extension_is_case_insensitive(self):
+        assert track_id_from_filename(f'Artist - Song [{TRACK_ID}].MP3') == TRACK_ID
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize('filename', [
+        f'Artist - Song [{TRACK_ID}].mp4.part',
+        f'Artist - Song [{TRACK_ID}].temp.mp3.ytdl',
+        'Artist - Song.mp3',
+        f'Artist - Song [{TRACK_ID}].mp4',
+    ])
+    def test_partial_or_other_files_are_not_tracks(self, filename):
+        assert track_id_from_filename(filename) is None
 
 
 class TestCreateDirectory:
-    """Tests for directory creation."""
 
     @pytest.mark.unit
-    def test_creates_new_directory(self, tmp_path, capsys):
-        """Test that a new directory is created."""
-        new_dir = tmp_path / "new_folder"
-        create_directory(str(new_dir))
-
-        assert new_dir.exists()
-        assert new_dir.is_dir()
-
-        captured = capsys.readouterr()
-        assert "created successfully" in captured.out
-
-    @pytest.mark.unit
-    def test_handles_existing_directory(self, tmp_path, capsys):
-        """Test that existing directory is handled gracefully."""
-        existing_dir = tmp_path / "existing_folder"
-        existing_dir.mkdir()
-
-        create_directory(str(existing_dir))
-
-        assert existing_dir.exists()
-        captured = capsys.readouterr()
-        assert "already exists" in captured.out
-
-    @pytest.mark.unit
-    def test_creates_nested_directories(self, tmp_path, capsys):
-        """Test that nested directories are created."""
-        nested_dir = tmp_path / "level1" / "level2" / "level3"
-        create_directory(str(nested_dir))
-
-        assert nested_dir.exists()
-        assert nested_dir.is_dir()
-
-        captured = capsys.readouterr()
-        assert "created successfully" in captured.out
+    def test_creates_nested_and_tolerates_existing(self, tmp_path):
+        target = tmp_path / 'a' / 'b'
+        create_directory(str(target))
+        create_directory(str(target))
+        assert target.is_dir()

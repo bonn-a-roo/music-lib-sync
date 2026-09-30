@@ -1,52 +1,54 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import sys
+import threading
+
+_config_lock = threading.Lock()
+
+
+class _SafeConsoleStream:
+    """Preserve stdout ownership while replacing unsupported console characters."""
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        try:
+            return self.stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(self.stream, 'encoding', None) or 'utf-8'
+            return self.stream.write(text.encode(encoding, errors='replace').decode(encoding))
+
+    def flush(self):
+        self.stream.flush()
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Get a configured logger instance.
-
-    Args:
-        name: Usually __name__ of the module calling this
-
-    Returns:
-        Configured logger instance
-    """
-    logger = logging.getLogger(name)
-
-    # Only configure if not already configured
-    if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
-
-        # Create logs directory if it doesn't exist
-        logs_dir = Path.home() / '.music-lib-sync' / 'logs'
-        logs_dir.mkdir(parents=True, exist_ok=True)
-
-        # File handler - detailed logs
-        file_handler = logging.FileHandler(logs_dir / 'music-sync.log')
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(file_formatter)
-
-        # Console handler - info and above only
-        import sys
-        import io
-        try:
-            # Reconfigure stdout to UTF-8 so Unicode playlist names don't crash
-            if hasattr(sys.stdout, 'reconfigure'):
-                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-            console_stream = sys.stdout
-        except Exception:
-            console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        console_handler = logging.StreamHandler(console_stream)
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(levelname)s: %(message)s')
-        console_handler.setFormatter(console_formatter)
-
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-
-    return logger
+    """Return a child of the once-configured, shared application logger."""
+    parent = logging.getLogger('mls')
+    with _config_lock:
+        if not getattr(parent, '_mls_configured', False):
+            parent.setLevel(logging.DEBUG)
+            parent.propagate = False
+            try:
+                logs_dir = Path(os.environ.get('MUSIC_LIB_SYNC_LOG_DIR') or
+                                Path.home() / '.music-lib-sync' / 'logs')
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                file_handler = RotatingFileHandler(
+                    logs_dir / 'music-sync.log', maxBytes=5 * 1024 * 1024,
+                    backupCount=3, encoding='utf-8')
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+                parent.addHandler(file_handler)
+            except OSError:
+                # Logging must remain usable even with an unwritable directory.
+                pass
+            if sys.stdout is not None:
+                console_handler = logging.StreamHandler(_SafeConsoleStream(sys.stdout))
+                console_handler.setLevel(logging.INFO)
+                console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+                parent.addHandler(console_handler)
+            parent._mls_configured = True
+    return logging.getLogger('mls.' + name)

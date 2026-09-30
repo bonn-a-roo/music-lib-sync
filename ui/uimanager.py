@@ -1,259 +1,267 @@
+import threading
 import time
 
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QMainWindow, QComboBox, QWidget, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QLabel, \
-    QLineEdit, QHBoxLayout, QProgressBar, QPlainTextEdit
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QComboBox, QWidget, QVBoxLayout,
+                             QPushButton, QFileDialog, QMessageBox, QLabel, QLineEdit,
+                             QProgressBar, QPlainTextEdit, QInputDialog)
 
+from downloaders.ytdlp import YoutubeDownloader
 from model.session_manager import SessionManager
 from utils import configutils
-from model.sync_result import SyncResult
+from utils.logutils import get_logger
+
+logger = get_logger(__name__)
 
 
-def _fmt_duration(seconds: float) -> str:
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m}m {s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m"
+def _fmt_duration(seconds):
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    if not minutes:
+        return f'{seconds}s'
+    hours, minutes = divmod(minutes, 60)
+    return f'{hours}h {minutes:02d}m' if hours else f'{minutes}m {seconds:02d}s'
 
 
 class OptionsWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Options")
-
-        self.download_path_label = QLabel("Download Path:", self)
-        self.download_path_entry = QLineEdit(self)
-        self.browse_path_button = QPushButton("Browse", self)
-        self.browse_path_button.clicked.connect(self.browse_download_path)
-
-        self.cookies_file_label = QLabel("Cookies File:", self)
-        self.cookies_file_entry = QLineEdit(self)
-        self.browse_cookies_button = QPushButton("Browse", self)
-        self.browse_cookies_button.clicked.connect(self.browse_cookies_file)
-
-        self.format_label = QLabel("Audio Format:", self)
-        self.format_combo = QComboBox(self)
+        self.setWindowTitle('Options')
+        layout = QVBoxLayout(self)
+        self.download_path_entry = QLineEdit(configutils.get_download_path())
+        self.cookies_file_entry = QLineEdit(configutils.get_cookies_file())
+        for label, entry, browse in [('Download Path:', self.download_path_entry, self.browse_download_path),
+                                     ('Cookies File:', self.cookies_file_entry, self.browse_cookies_file)]:
+            layout.addWidget(QLabel(label))
+            layout.addWidget(entry)
+            button = QPushButton('Browse')
+            button.clicked.connect(browse)
+            layout.addWidget(button)
+        layout.addWidget(QLabel('Audio Format:'))
+        self.format_combo = QComboBox()
         self.format_combo.addItems(['mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav'])
-
-        self.providers_label = QLabel("Audio Providers:", self)
-        self.providers_entry = QLineEdit(self)
-        self.providers_entry.setPlaceholderText("e.g. piped youtube")
-
-        self.save_button = QPushButton("Save Options", self)
+        self.format_combo.setCurrentText(configutils.get_audio_format())
+        layout.addWidget(self.format_combo)
+        self.save_button = QPushButton('Save Options')
         self.save_button.clicked.connect(self.save_options)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.download_path_label)
-        layout.addWidget(self.download_path_entry)
-        layout.addWidget(self.browse_path_button)
-        layout.addWidget(self.cookies_file_label)
-        layout.addWidget(self.cookies_file_entry)
-        layout.addWidget(self.browse_cookies_button)
-
-        format_row = QHBoxLayout()
-        format_row.addWidget(self.format_label)
-        format_row.addWidget(self.format_combo)
-        layout.addLayout(format_row)
-
-        layout.addWidget(self.providers_label)
-        layout.addWidget(self.providers_entry)
-
         layout.addWidget(self.save_button)
-
-        self.status_label = QLabel("", self)
-        self.status_label.setStyleSheet("color: green;")
+        self.status_label = QLabel('')
         layout.addWidget(self.status_label)
 
-        self.setLayout(layout)
-
-        # Load and display the saved values
-        self.load_saved_values()
-
-    def load_saved_values(self):
-        self.download_path_entry.setText(configutils.get_download_path())
-        self.cookies_file_entry.setText(configutils.get_cookies_file())
-        fmt = configutils.get_audio_format()
-        idx = self.format_combo.findText(fmt)
-        if idx >= 0:
-            self.format_combo.setCurrentIndex(idx)
-        self.providers_entry.setText(configutils.get_audio_providers())
-
     def browse_download_path(self):
-        download_path = QFileDialog.getExistingDirectory(self, "Select Download Path")
-        if download_path:
-            self.download_path_entry.setText(download_path)
+        path = QFileDialog.getExistingDirectory(self, 'Select Download Path')
+        if path:
+            self.download_path_entry.setText(path)
 
     def browse_cookies_file(self):
-        cookies_file, _ = QFileDialog.getOpenFileName(self, "Select Cookies File")
-        if cookies_file:
-            self.cookies_file_entry.setText(cookies_file)
+        path, _ = QFileDialog.getOpenFileName(self, 'Select Cookies File')
+        if path:
+            self.cookies_file_entry.setText(path)
 
     def save_options(self):
-        download_path = self.download_path_entry.text()
-        cookies_file = self.cookies_file_entry.text()
+        try:
+            configutils.set_value('Settings', 'download_path', self.download_path_entry.text())
+            configutils.set_value('Settings', 'cookies_file', self.cookies_file_entry.text())
+            configutils.set_value('Settings', 'audio_format', self.format_combo.currentText())
+        except Exception as exc:
+            logger.exception('Saving options failed')
+            QMessageBox.critical(self, 'Could not save options', str(exc))
+            return
+        self.status_label.setText('Saved.')
+        QTimer.singleShot(2000, lambda: self.status_label.setText(''))
 
-        if download_path:
-            configutils.set_value('Settings', 'download_path', download_path)
-        if cookies_file:
-            configutils.set_value('Settings', 'cookies_file', cookies_file)
-        configutils.set_value('Settings', 'audio_format', self.format_combo.currentText())
-        providers = self.providers_entry.text().strip()
-        if providers:
-            configutils.set_value('Settings', 'audio_providers', providers)
 
-        self.status_label.setText("Saved.")
-        QTimer.singleShot(2000, lambda: self.status_label.setText(""))
+class SyncWorker(QThread):
+    result_ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
+    log_line = pyqtSignal(str)
+
+    def __init__(self, selected_user, kind, downloader=None):
+        super().__init__()
+        self.selected_user = selected_user
+        self.kind = kind
+        self._downloader = downloader
+        self._cancelled = threading.Event()
+        if downloader:
+            downloader.log_callback = self.log_line.emit
+
+    def cancel(self):
+        self._cancelled.set()
+        if self._downloader:
+            self._downloader.cancel()
+
+    def run(self):
+        try:
+            library = self.selected_user.library
+            if self.kind == 'repair':
+                result = library.repair_library(progress_callback=self.progress.emit,
+                                                cancel_check=self._cancelled.is_set)
+            elif self.kind in ('songs', 'playlists'):
+                result = getattr(library, 'sync_' + self.kind)(
+                    downloader=self._downloader, progress_callback=self.progress.emit)
+            else:
+                raise ValueError(f'Unknown sync kind: {self.kind}')
+            self.result_ready.emit(result)
+        except BaseException as exc:
+            logger.exception('Library operation failed')
+            self.failed.emit(str(exc) or type(exc).__name__)
 
 
 class SyncWindow(QWidget):
     def __init__(self, selected_user):
         super().__init__()
+        self.selected_user = selected_user
         self.options_window = None
         self.sync_thread = None
-        self.setWindowTitle("Synchronization")
-
-        self.selected_user = selected_user
-        self.sync_songs_button = QPushButton("Sync Songs", self)
+        self.setWindowTitle('Synchronization')
+        layout = QVBoxLayout(self)
+        self.sync_songs_button = QPushButton('Sync Songs')
+        self.sync_playlists_button = QPushButton('Sync Playlists')
+        self.repair_button = QPushButton('Repair Library')
+        self.options_button = QPushButton('Options')
         self.sync_songs_button.clicked.connect(self.sync_songs)
-
-        self.sync_playlists_button = QPushButton("Sync Playlists", self)
         self.sync_playlists_button.clicked.connect(self.sync_playlists)
-
-        self.options_button = QPushButton("Options", self)
+        self.repair_button.clicked.connect(self.repair_library)
         self.options_button.clicked.connect(self.open_options_window)
-
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setVisible(False)
-
-        self.eta_label = QLabel("", self)
-        self.eta_label.setVisible(False)
-
-        self.status_label = QLabel("", self)
-        self.status_label.setVisible(False)
-
-        self.cancel_button = QPushButton("Cancel", self)
-        self.cancel_button.setVisible(False)
+        self._buttons = (self.sync_songs_button, self.sync_playlists_button, self.repair_button, self.options_button)
+        for button in self._buttons:
+            layout.addWidget(button)
+        self.progress_bar = QProgressBar()
+        self.eta_label = QLabel('')
+        self.status_label = QLabel('')
+        self.cancel_button = QPushButton('Cancel')
         self.cancel_button.clicked.connect(self.cancel_sync)
-
-        self.log_output = QPlainTextEdit(self)
+        self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setFont(QFont("Consolas", 8))
+        self.log_output.setFont(QFont('Consolas', 8))
+        self.log_output.setMaximumBlockCount(2000)
         self.log_output.setMinimumHeight(120)
         self.log_output.setMaximumHeight(200)
-        self.log_output.setVisible(False)
-
-        self._sync_start: float = 0.0
+        self._run_widgets = (self.progress_bar, self.eta_label, self.status_label, self.cancel_button, self.log_output)
+        for widget in self._run_widgets:
+            layout.addWidget(widget)
+            widget.hide()
+        self._sync_start = None
         self._progress_state = (0, 0)
         self._eta_timer = QTimer(self)
         self._eta_timer.setInterval(1000)
         self._eta_timer.timeout.connect(self._update_eta)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.sync_songs_button)
-        layout.addWidget(self.sync_playlists_button)
-        layout.addWidget(self.options_button)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.eta_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.cancel_button)
-        layout.addWidget(self.log_output)
-
-        self.setLayout(layout)
+    def _begin(self, kind):
+        if self.sync_thread and self.sync_thread.isRunning():
+            return
+        try:
+            downloader = None
+            if kind != 'repair':
+                downloader = YoutubeDownloader(cookies_file=configutils.get_cookies_file() or None)
+                problems = downloader.preflight()
+                if problems:
+                    QMessageBox.critical(self, 'Download prerequisites missing', '\n'.join(problems))
+                    return
+            self._start_sync(SyncWorker(self.selected_user, kind, downloader))
+        except BaseException as exc:
+            logger.exception('Preparing library operation failed')
+            self.on_sync_failed(str(exc))
 
     def _start_sync(self, worker):
-        self.sync_songs_button.setEnabled(False)
-        self.sync_playlists_button.setEnabled(False)
-        self.options_button.setEnabled(False)
-
-        if self.sync_thread is not None:
-            self.sync_thread.wait()
-
+        if self.sync_thread and self.sync_thread.isRunning():
+            return
+        for button in self._buttons:
+            button.setEnabled(False)
         self.sync_thread = worker
-        self.sync_thread.result_ready.connect(self.on_sync_finished)
-        self.sync_thread.progress.connect(self.on_progress)
-        self.sync_thread.log_line.connect(self.append_log)
-
-        self._sync_start = time.time()
+        worker.result_ready.connect(self.on_sync_finished)
+        worker.failed.connect(self.on_sync_failed)
+        worker.progress.connect(self.on_progress)
+        worker.log_line.connect(self.append_log)
+        self._sync_start = None
         self._progress_state = (0, 0)
-
-        self.progress_bar.setMaximum(0)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
-        self.eta_label.setText("Elapsed: 0s")
-        self.eta_label.setVisible(True)
-        self.status_label.setText("")
-        self.status_label.setVisible(True)
-        self.cancel_button.setText("Cancel")
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText('Fetching library from Spotify...')
+        self.eta_label.setText('Waiting for library...')
+        self.cancel_button.setText('Cancel')
         self.cancel_button.setEnabled(True)
-        self.cancel_button.setVisible(True)
         self.log_output.clear()
-        self.log_output.setVisible(True)
-
-        self._eta_timer.start()
-        self.sync_thread.start()
+        for widget in self._run_widgets:
+            widget.show()
+        worker.start()
 
     def sync_songs(self):
-        self._start_sync(SyncSongsWorker(self.selected_user))
+        self._begin('songs')
 
     def sync_playlists(self):
-        self._start_sync(SyncPlaylistsWorker(self.selected_user))
+        self._begin('playlists')
+
+    def repair_library(self):
+        answer = QMessageBox.question(self, 'Repair Library',
+            'Repair flattens nested folders, moves wrong-length files to _rejected, '
+            'and writes missing audio metadata tags. Continue?', QMessageBox.Yes | QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self._begin('repair')
 
     def cancel_sync(self):
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Cancelling...")
+        self.cancel_button.setText('Cancelling...')
         if self.sync_thread:
             self.sync_thread.cancel()
 
-    def append_log(self, line: str):
+    def append_log(self, line):
         self.log_output.appendPlainText(line)
-        sb = self.log_output.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        scrollbar = self.log_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _update_eta(self):
-        elapsed = time.time() - self._sync_start
+        if self._sync_start is None:
+            return
+        elapsed = max(0.001, time.monotonic() - self._sync_start)
         current, total = self._progress_state
-        if current > 0 and total > 0 and current < total:
-            rate = current / elapsed
-            eta = (total - current) / rate
-            self.eta_label.setText(
-                f"Elapsed: {_fmt_duration(elapsed)}  |  ETA: {_fmt_duration(eta)}"
-            )
-        else:
-            self.eta_label.setText(f"Elapsed: {_fmt_duration(elapsed)}")
+        text = f'Elapsed: {_fmt_duration(elapsed)}'
+        if 0 < current < total:
+            text += f'  |  ETA: {_fmt_duration((total - current) * elapsed / current)}'
+        self.eta_label.setText(text)
 
-    def on_progress(self, current: int, total: int, name: str):
+    def on_progress(self, current, total, name):
+        if self._sync_start is None and current == 0 and not name:
+            self._sync_start = time.monotonic()
+            self._eta_timer.start()
+            self.status_label.setText('Processing library...')
         self._progress_state = (current, total)
-        if total > 0:
-            self.progress_bar.setMaximum(total)
-            self.progress_bar.setValue(current)
+        self.progress_bar.setRange(0, max(1, total))
+        self.progress_bar.setValue(current)
         if name:
-            self.status_label.setText(f"Downloading: {name}")
+            self.status_label.setText(f'Last completed: {name}')
+        self._update_eta()
 
-    def on_sync_finished(self, result: SyncResult):
+    def _restore(self):
         self._eta_timer.stop()
-        self.sync_songs_button.setEnabled(True)
-        self.sync_playlists_button.setEnabled(True)
-        self.options_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.eta_label.setVisible(False)
-        self.status_label.setVisible(False)
-        self.cancel_button.setVisible(False)
-        self.cancel_button.setText("Cancel")
+        for button in self._buttons:
+            button.setEnabled(True)
+        for widget in self._run_widgets:
+            widget.hide()
+        self.cancel_button.setText('Cancel')
         self.cancel_button.setEnabled(True)
-        self.log_output.setVisible(False)
 
+    def on_sync_failed(self, message):
+        self._restore()
+        QMessageBox.critical(self, 'Library operation failed', message)
+
+    def on_sync_finished(self, result):
+        self._restore()
         if result.cancelled:
-            msg = result.get_summary() + "\n\nRun sync again to continue where you left off."
-            QMessageBox.information(self, "Sync Cancelled", msg)
+            QMessageBox.information(self, 'Sync Cancelled', result.get_summary())
         elif result.has_failures:
-            QMessageBox.warning(self, "Sync Complete (with errors)", result.get_summary())
+            QMessageBox.warning(self, 'Sync Complete (with errors)', result.get_summary())
         else:
-            QMessageBox.information(self, "Sync Complete", result.get_summary())
+            QMessageBox.information(self, 'Sync Complete', result.get_summary())
+
+    def closeEvent(self, event):
+        if self.sync_thread and self.sync_thread.isRunning():
+            self.sync_thread.cancel()
+            if not self.sync_thread.wait(5000):
+                event.ignore()
+                return
+        event.accept()
 
     def open_options_window(self):
         if not self.options_window:
@@ -261,91 +269,121 @@ class SyncWindow(QWidget):
         self.options_window.show()
 
 
-class SyncSongsWorker(QThread):
-    result_ready = pyqtSignal(object)
-    progress = pyqtSignal(int, int, str)
-    log_line = pyqtSignal(str)
+class ManualUrlProvider(QObject):
+    requested = pyqtSignal(object)
 
-    def __init__(self, selected_user):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.requested.connect(self._show_dialog)
+
+    def __call__(self, auth_url):
+        request = {'url': auth_url, 'done': threading.Event(), 'answer': None}
+        self.requested.emit(request)
+        request['done'].wait()
+        return request['answer']
+
+    @pyqtSlot(object)
+    def _show_dialog(self, request):
+        try:
+            text, accepted = QInputDialog.getText(self.parent(), 'Spotify Authentication',
+                'Authorize in your browser, then paste the FULL redirect URL:')
+            if accepted:
+                request['answer'] = text
+        finally:
+            request['done'].set()
+
+
+class AuthWorker(QThread):
+    authenticated = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, manager, provider):
         super().__init__()
-        self.selected_user = selected_user
-        self._downloader = None
-
-    def cancel(self):
-        if self._downloader:
-            self._downloader.cancel()
+        self.manager = manager
+        self.provider = provider
+        self.cancel_event = threading.Event()
 
     def run(self):
-        from downloaders.ytdlp import YoutubeDownloader
-        self._downloader = YoutubeDownloader()
-        self._downloader.log_callback = lambda line: self.log_line.emit(line)
-        def _progress(current, total, name):
-            self.progress.emit(current, total, name)
-        result = self.selected_user.library.sync_songs(
-            downloader=self._downloader,
-            progress_callback=_progress,
-        )
-        self.result_ready.emit(result)
-
-
-class SyncPlaylistsWorker(QThread):
-    result_ready = pyqtSignal(object)
-    progress = pyqtSignal(int, int, str)
-    log_line = pyqtSignal(str)
-
-    def __init__(self, selected_user):
-        super().__init__()
-        self.selected_user = selected_user
-        self._downloader = None
-
-    def cancel(self):
-        if self._downloader:
-            self._downloader.cancel()
-
-    def run(self):
-        from downloaders.ytdlp import YoutubeDownloader
-        self._downloader = YoutubeDownloader()
-        self._downloader.log_callback = lambda line: self.log_line.emit(line)
-        def _progress(current, total, name):
-            self.progress.emit(current, total, name)
-        result = self.selected_user.library.sync_playlists(
-            downloader=self._downloader,
-            progress_callback=_progress,
-        )
-        self.result_ready.emit(result)
+        try:
+            self.authenticated.emit(self.manager.create_user(
+                manual_url_provider=self.provider, cancel_event=self.cancel_event))
+        except BaseException as exc:
+            logger.exception('Spotify authentication failed')
+            self.failed.emit(str(exc) or type(exc).__name__)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Music Library Sync")
+        self.setWindowTitle('Music Library Sync')
         self.session_manager = SessionManager()
-        self.users = self.session_manager.get_users()
-
-        self.user_selection = QComboBox(self)
-        for user in self.users:
-            self.user_selection.addItem(f"{user.get_name()} ({user.get_id()})")
-        self.user_selection.currentIndexChanged.connect(self.handle_user_selection)
-
+        self.auth_thread = None
+        self.manual_url_provider = ManualUrlProvider(self)
         self.central_widget = QWidget(self)
         self.setCentralWidget(self.central_widget)
-
         layout = QVBoxLayout(self.central_widget)
+        self.user_selection = QComboBox()
         layout.addWidget(self.user_selection)
-
-        self.sync_button = QPushButton("Go", self)
+        self.sync_button = QPushButton('Go')
         self.sync_button.clicked.connect(self.handle_user_selection)
         layout.addWidget(self.sync_button)
+        self.auth_status = QLabel('')
+        layout.addWidget(self.auth_status)
+        self._populate_users()
+        if not self.users:
+            self.sync_button.setEnabled(False)
+            QTimer.singleShot(0, self.start_authentication)
 
-    def handle_user_selection(self, index=None):
-        if index is None:
-            index = self.user_selection.currentIndex()
-        id_part = self.user_selection.itemText(index).split("(")[1].rstrip(")")  # Remove name, "(" and ")"
-        user_id = id_part.strip()
+    def _populate_users(self, unused=None):
+        self.users = self.session_manager.get_users()
+        self.user_selection.clear()
+        for user in self.users:
+            self.user_selection.addItem(f'{user.get_name()} ({user.get_id()})', user.get_id())
+        self.sync_button.setEnabled(bool(self.users))
+        self.auth_status.setText('')
+
+    def start_authentication(self):
+        if self.auth_thread and self.auth_thread.isRunning():
+            return
+        self.auth_status.setText('Authenticating with Spotify...')
+        self.auth_thread = AuthWorker(self.session_manager, self.manual_url_provider)
+        self.auth_thread.authenticated.connect(self._populate_users)
+        self.auth_thread.failed.connect(self._authentication_failed)
+        self.auth_thread.start()
+
+    def _authentication_failed(self, message):
+        self.auth_status.setText('Authentication failed.')
+        dialog = QMessageBox(QMessageBox.Critical, 'Spotify Authentication', message,
+                             QMessageBox.Retry | QMessageBox.Close, self)
+        dialog.button(QMessageBox.Close).setText('Quit')
+        dialog.setDefaultButton(QMessageBox.Retry)
+        answer = dialog.exec_()
+        if answer == QMessageBox.Retry:
+            # The failed signal can arrive just before QThread finishes.
+            QTimer.singleShot(100, self.start_authentication)
+        else:
+            self.close()
+
+    def handle_user_selection(self, checked=False):
+        user_id = self.user_selection.currentData()
+        if user_id is None:
+            return
         self.session_manager.set_session_id(user_id)
         self.open_sync_window()
 
     def open_sync_window(self):
-        selected_user = self.session_manager.get_selected_user()
-        sync_window = SyncWindow(selected_user)
-        self.setCentralWidget(sync_window)
+        selected = self.session_manager.get_selected_user()
+        if selected:
+            self.setCentralWidget(SyncWindow(selected))
+
+    def closeEvent(self, event):
+        widget = self.centralWidget()
+        if isinstance(widget, SyncWindow) and not widget.close():
+            event.ignore()
+            return
+        if self.auth_thread and self.auth_thread.isRunning():
+            self.auth_thread.cancel_event.set()
+            if not self.auth_thread.wait(3000):
+                event.ignore()
+                return
+        event.accept()

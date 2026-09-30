@@ -1,267 +1,307 @@
 import abc
 import os
-import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-from downloaders.spotifydl import SpotifyDownloader
+import requests
+from spotipy import SpotifyException
 
-# Cap total concurrent Spotify API requests across all thread pools
-_spotify_semaphore = threading.Semaphore(4)
 from model.playlist import Playlist
 from model.song import Song
 from model.sync_result import SyncResult
-from utils import configutils
+from utils import configutils, durationcheck, metadatautils, repair
+from utils.fileutils import sanitize_path_component, track_id_from_filename
 from utils.logutils import get_logger
 
 logger = get_logger(__name__)
+_sleep = time.sleep
+_spotify_semaphore = threading.Semaphore(4)
 
 
-def extract_track_id_from_url(spotify_url: str) -> str | None:
-    """Extract track ID from Spotify URL."""
-    match = re.search(r'/track/([a-zA-Z0-9]+)', spotify_url)
-    return match.group(1) if match else None
+class LibraryFetchError(Exception):
+    """Spotify could not provide a complete library listing."""
+
+
+class _FetchCancelled(Exception):
+    pass
 
 
 class LibrarySyncSource(abc.ABC):
     @abc.abstractmethod
-    def sync_songs(self):
+    def sync_songs(self, downloader, progress_callback=None):
         pass
 
-    def sync_playlists(self):
+    @abc.abstractmethod
+    def sync_playlists(self, downloader, progress_callback=None):
         pass
 
 
 class SpotifyLibrary(LibrarySyncSource):
     def __init__(self, auth):
         self.auth = auth
+        self._user_id = None
+        self._saved_unavailable = 0
 
-    def _extract_track_id(self, spotify_url: str) -> str | None:
-        """Extract track ID from Spotify URL."""
-        match = re.search(r'/track/([a-zA-Z0-9]+)', spotify_url)
-        return match.group(1) if match else None
+    def _spotify_call(self, fn, *args, cancel_check=None, **kwargs):
+        """Retry transport/transient API failures without making waits uninterruptible.
 
-    def get_saved_tracks(self, limit_step=50):
-        tracks = []
-        songs = []
-        offset = 0
-        while True:
+        Spotipy may already have exhausted urllib3 retries: that path produces
+        a 429 SpotifyException without response headers. HTTP errors otherwise
+        preserve the response's reason and Retry-After header.
+        """
+        for attempt in range(5):
+            if cancel_check and cancel_check():
+                raise _FetchCancelled()
             try:
-                response = self.auth.current_user_saved_tracks(
-                    limit=limit_step,
-                    offset=offset,
-                )
-
-                if len(response['items']) == 0:
-                    break
-                tracks.extend(response['items'])
-                offset += limit_step
-            except Exception as e:
-                logger.error(f"Failed to fetch saved tracks at offset {offset}: {e}")
-                break
-
-        for idx, item in enumerate(tracks):
-            track = item['track']
-            song = Song.from_spotify_track(track)
-            if song:
-                songs.append(song)
-        return songs
-
-    def get_playlists(self, limit_step=50):
-        playlists = []
-        results = []
-        offset = 0
-
-        logger.info("Fetching playlist list from Spotify...")
-        while True:
-            try:
-                response = self.auth.current_user_playlists(
-                    limit=limit_step,
-                    offset=offset,
-                )
-
-                if len(response['items']) == 0:
-                    break
-                playlists.extend(response['items'])
-                logger.info(f"Fetched {len(playlists)} playlists so far...")
-                offset += limit_step
-            except Exception as e:
-                logger.error(f"Failed to fetch playlists at offset {offset}: {e}")
-                break
-
-        logger.info(f"Fetched {len(playlists)} playlists total. Now fetching songs for each...")
-
-        def _fetch_playlist(item):
-            playlist_url = item['external_urls']['spotify']
-            logger.info(f"Fetching songs for playlist: {item['name']}")
-            playlist_songs = self._get_playlist_songs(item['id'])
-            return Playlist(name=item['name'], songs=playlist_songs, url=playlist_url)
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(_fetch_playlist, item): item for item in playlists}
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    logger.error(f"Failed to process playlist {item.get('name', 'Unknown')}: {e}")
-
-        return results
-
-    def _get_playlist_songs(self, playlist_id: str) -> list[Song]:
-        """Fetch all songs from a playlist, using parallel requests once total is known."""
-        limit_step = 100
-
-        # First page to get total count
-        try:
-            with _spotify_semaphore:
-                first = self.auth.playlist_items(
-                    playlist_id,
-                    limit=limit_step,
-                    offset=0,
-                    additional_types=('track',)
-                )
-        except Exception as e:
-            logger.error(f"Failed to fetch playlist items: {e}")
-            return []
-
-        total = first.get('total', 0)
-        logger.info(f"  -> Got {len(first['items'])} tracks at offset 0 (total: {total})")
-
-        pages: dict[int, list] = {0: first['items']}
-        remaining_offsets = list(range(limit_step, total, limit_step))
-
-        if remaining_offsets:
-            def _fetch_page(offset):
                 with _spotify_semaphore:
-                    response = self.auth.playlist_items(
-                        playlist_id,
-                        limit=limit_step,
-                        offset=offset,
-                        additional_types=('track',)
-                    )
-                logger.info(f"  -> Got {len(response['items'])} tracks at offset {offset}")
-                return offset, response['items']
+                    return fn(*args, **kwargs)
+            except Exception as error:
+                quota = isinstance(error, SpotifyException) and error.http_status == 429 and 'QUOTA_EXCEEDED' in str(error.reason or error.msg)
+                retryable = isinstance(error, (requests.ConnectionError, requests.Timeout)) or (
+                    isinstance(error, SpotifyException) and error.http_status in (429, 500, 502, 503, 504)
+                )
+                if not retryable or attempt == 4 or (quota and attempt >= 1):
+                    message = f'Spotify application quota exceeded (QUOTA_EXCEEDED): {error}' if quota else str(error)
+                    raise LibraryFetchError(message) from error
+                headers = getattr(error, 'headers', {}) or {}
+                retry_after = next((value for key, value in headers.items() if key.lower() == 'retry-after'), None)
+                try:
+                    delay = max(0.0, float(retry_after)) if retry_after is not None else min(30, 2 ** (attempt + 1))
+                except (TypeError, ValueError):
+                    delay = min(30, 2 ** (attempt + 1))
+                logger.debug('Retrying Spotify request after %.1fs: %s', delay, error)
+                while delay > 0:
+                    if cancel_check and cancel_check():
+                        raise _FetchCancelled()
+                    interval = min(delay, 0.1)
+                    _sleep(interval)
+                    delay = max(0, delay - interval)
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(_fetch_page, off): off for off in remaining_offsets}
-                for future in as_completed(futures):
-                    try:
-                        offset, items = future.result()
-                        pages[offset] = items
-                    except Exception as e:
-                        logger.error(f"Failed to fetch page: {e}")
+    def _pages(self, fn, limit, cancel_check=None, *args, **kwargs):
+        offset = 0
+        while True:
+            response = self._spotify_call(fn, *args, limit=limit, offset=offset, cancel_check=cancel_check, **kwargs)
+            if not isinstance(response, dict) or not isinstance(response.get('items'), list):
+                raise LibraryFetchError('Spotify returned an invalid page')
+            items = response['items']
+            logger.debug('Fetched %d Spotify items at offset %d', len(items), offset)
+            yield items
+            offset += len(items)
+            total = response.get('total')
+            if not items or (total is not None and offset >= total):
+                return
+            if not response.get('next') and (total is None or offset >= total):
+                return
 
+    @staticmethod
+    def _song(item):
+        track = item.get('item') or item.get('track')
+        if not track or track.get('is_local') or item.get('is_local') or not track.get('id') or track.get('type', 'track') != 'track':
+            return None
+        return Song.from_spotify_track(track)
+
+    def get_saved_tracks(self, cancel_check=None):
+        self._saved_unavailable = 0
         songs = []
-        for offset in sorted(pages):
-            for item in pages[offset]:
-                track = item.get('track')
-                if track is None:
-                    continue
-                song = Song.from_spotify_track(track)
+        for items in self._pages(self.auth.current_user_saved_tracks, 50, cancel_check):
+            for item in items:
+                song = self._song(item)
                 if song:
                     songs.append(song)
-
+                else:
+                    self._saved_unavailable += 1
         return songs
 
-    def _get_downloaded_track_ids(self, directory: str) -> set[str]:
-        """Extract track IDs from downloaded files using spotdl's filename pattern."""
-        track_ids = set()
-        if not os.path.exists(directory):
-            return track_ids
+    def _get_playlist_songs(self, playlist_id, cancel_check=None):
+        songs = []
+        for items in self._pages(self.auth.playlist_items, 100, cancel_check, playlist_id, additional_types=('track',)):
+            songs.extend(song for item in items if (song := self._song(item)) is not None)
+        return songs
 
-        # spotdl uses pattern: {artist} - {track} [{track_id}].mp3
-        pattern = re.compile(r'\[([a-zA-Z0-9]+)\]\.mp3$')
+    def get_playlists(self, cancel_check=None):
+        if self._user_id is None:
+            profile = self._spotify_call(self.auth.current_user, cancel_check=cancel_check)
+            self._user_id = profile.get('id') if isinstance(profile, dict) else None
+            if not self._user_id:
+                raise LibraryFetchError('Spotify did not return the current user id')
+        items = [item for page in self._pages(self.auth.current_user_playlists, 50, cancel_check) for item in page]
 
-        for filename in os.listdir(directory):
-            match = pattern.search(filename)
-            if match:
-                track_ids.add(match.group(1))
+        def fetch(item):
+            playlist = Playlist(name=item.get('name'), url=(item.get('external_urls') or {}).get('spotify'), id=item.get('id'))
+            if (item.get('owner') or {}).get('id') != self._user_id and not item.get('collaborative'):
+                playlist.skipped_reason = 'not owned or collaborative; Spotify does not expose its tracks'
+                return playlist
+            try:
+                if not playlist.id:
+                    raise LibraryFetchError('Playlist has no id')
+                playlist.songs = self._get_playlist_songs(playlist.id, cancel_check)
+            except LibraryFetchError as error:
+                playlist.error = str(error)
+            return playlist
 
-        return track_ids
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            return list(executor.map(fetch, items))
 
-    def sync_songs(self, downloader=None, progress_callback=None) -> SyncResult:
-        if downloader is None:
-            cookies = configutils.get_cookies_file()
-            downloader = SpotifyDownloader(
-                cookies=cookies if cookies else None,
-                client_id=configutils.get_spotify_client_id(),
-                client_secret=configutils.get_spotify_client_secret(),
-            )
-        download_path = configutils.get_download_path()
+    def _get_downloaded_track_ids(self, directory):
+        if not os.path.isdir(directory):
+            return set()
+        return {track_id for entry in os.scandir(directory) if entry.is_file() and (track_id := track_id_from_filename(entry.name))}
 
-        my_songs = self.get_saved_tracks()
-        logger.info(f"Found {len(my_songs)} saved tracks")
+    @staticmethod
+    def _playlist_directories(download_path, playlists):
+        names = [sanitize_path_component(playlist.name) for playlist in playlists]
+        counts = {}
+        for name in names:
+            counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+        return [os.path.join(download_path, 'playlists', name + (f' [{(playlist.id or "unknown")[:6]}]' if counts[name.casefold()] > 1 else '')) for name, playlist in zip(names, playlists)]
 
-        my_songs_dir = os.path.join(download_path, "my_songs")
-        if not os.path.exists(my_songs_dir):
-            os.makedirs(my_songs_dir)
+    @staticmethod
+    def _new_songs(songs, downloaded):
+        seen = set(downloaded)
+        new = []
+        for song in songs:
+            if song.track_id and song.track_id not in seen:
+                new.append(song)
+                seen.add(song.track_id)
+        return new
 
-        # Use track IDs for more reliable matching
-        downloaded_track_ids = self._get_downloaded_track_ids(my_songs_dir)
-        songs_to_download = [song for song in my_songs if song.track_id and song.track_id not in downloaded_track_ids]
-
-        logger.info(f"Downloading {len(songs_to_download)} new songs (skipping {len(my_songs) - len(songs_to_download)} already downloaded)")
-
-        result = downloader.download(songs_to_download, my_songs_dir, num_threads=4, progress_callback=progress_callback)
-        result.skipped_count = len(my_songs) - len(songs_to_download)
-        if downloader.is_cancelled():
-            result.cancelled = True
-        return result
-
-    def sync_playlists(self, downloader=None, progress_callback=None) -> SyncResult:
-        if downloader is None:
-            cookies = configutils.get_cookies_file()
-            downloader = SpotifyDownloader(
-                cookies=cookies if cookies else None,
-                client_id=configutils.get_spotify_client_id(),
-                client_secret=configutils.get_spotify_client_secret(),
-            )
-        download_path = configutils.get_download_path()
-
-        my_playlists = self.get_playlists()
-        logger.info(f"Found {len(my_playlists)} playlists")
-
-        # For each playlist, check which songs are already downloaded
+    def sync_songs(self, downloader, progress_callback=None):
         result = SyncResult()
-
-        for playlist in my_playlists:
+        try:
+            songs = self.get_saved_tracks(cancel_check=downloader.is_cancelled)
+            if self._saved_unavailable:
+                result.add_note(f'Skipped {self._saved_unavailable} unavailable, local, or id-less saved tracks.')
             if downloader.is_cancelled():
-                break
-
-            playlist_dir = os.path.join(download_path, "playlists", playlist.name)
-            if not os.path.exists(playlist_dir):
-                os.makedirs(playlist_dir)
-
-            downloaded_track_ids = self._get_downloaded_track_ids(playlist_dir)
-            songs_to_download = [song for song in playlist.songs if song.track_id and song.track_id not in downloaded_track_ids]
-
-            logger.info(f"Playlist '{playlist.name}': {len(songs_to_download)} new songs out of {len(playlist.songs)} total")
-
-            if songs_to_download:
-                playlist_result = downloader.download(songs_to_download, playlist_dir, num_threads=1, progress_callback=progress_callback)
-                result.success_count += playlist_result.success_count
-                result.failure_count += playlist_result.failure_count
-                result.errors.extend(playlist_result.errors)
-            else:
-                result.skipped_count += len(playlist.songs)
-
-        if downloader.is_cancelled():
+                raise _FetchCancelled()
+            directory = os.path.join(configutils.get_download_path(), 'my_songs')
+            os.makedirs(directory, exist_ok=True)
+            repair.flatten_nested_tracks(directory)
+            new = self._new_songs(songs, self._get_downloaded_track_ids(directory))
+            result.add_skipped(len(songs) - len(new))
+            logger.info('Saved tracks: downloading %d new songs out of %d', len(new), len(songs))
+            if new:
+                result.merge(downloader.download(new, directory, progress_callback=progress_callback))
+        except _FetchCancelled:
             result.cancelled = True
+        except (LibraryFetchError, OSError) as error:
+            result.add_failure('Saved tracks', None, str(error))
+        result.cancelled |= downloader.is_cancelled()
         return result
 
-# class AppleMusicLibrary(LibrarySyncSource):
-#    def __init__(self, developer_token):
-#        self.apple_music_api = AppleMusicAPI(developer_token)
+    def sync_playlists(self, downloader, progress_callback=None):
+        result = SyncResult()
+        plans = []
+        try:
+            playlists = self.get_playlists(cancel_check=downloader.is_cancelled)
+            directories = self._playlist_directories(configutils.get_download_path(), playlists)
+            for playlist, directory in zip(playlists, directories):
+                if downloader.is_cancelled():
+                    raise _FetchCancelled()
+                if playlist.skipped_reason:
+                    result.add_note(f'Playlist {playlist.name} skipped: {playlist.skipped_reason}')
+                    continue
+                if playlist.error:
+                    result.add_failure(playlist.name, playlist.url, playlist.error)
+                    continue
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                    repair.flatten_nested_tracks(directory)
+                    new = self._new_songs(playlist.songs, self._get_downloaded_track_ids(directory))
+                except OSError as error:
+                    result.add_failure(playlist.name, playlist.url, str(error))
+                    continue
+                result.add_skipped(len(playlist.songs) - len(new))
+                if new:
+                    plans.append((new, directory))
+            total = sum(len(songs) for songs, _ in plans)
+            if progress_callback:
+                progress_callback(0, total, '')
+            offset = 0
+            last_done = 0
+            progress_lock = threading.Lock()
+            for songs, directory in plans:
+                if downloader.is_cancelled():
+                    raise _FetchCancelled()
+                def progress(done, _total, name, base=offset):
+                    nonlocal last_done
+                    if done == 0:
+                        return
+                    if progress_callback:
+                        with progress_lock:
+                            last_done = max(last_done, min(total, base + done))
+                            progress_callback(last_done, total, name)
+                result.merge(downloader.download(songs, directory, progress_callback=progress))
+                offset += len(songs)
+                if result.cancelled:
+                    break
+        except _FetchCancelled:
+            result.cancelled = True
+        except LibraryFetchError as error:
+            result.add_failure('Playlists', None, str(error))
+        result.cancelled |= downloader.is_cancelled()
+        return result
 
-#    def get_saved_songs(self):
-#        # Implementation specific to Apple Music API
-#        pass
-
-#    def get_saved_albums(self):
-#        # Implementation specific to Apple Music API
-#        pass
-
-#    def sync_library_locally(self):
-#        # Implementation specific to Apple Music library sync
-#        pass
+    def repair_library(self, progress_callback=None, cancel_check=None):
+        result = SyncResult()
+        cancel_check = cancel_check or (lambda: False)
+        songs = {}
+        playlists = []
+        try:
+            for song in self.get_saved_tracks(cancel_check):
+                songs[song.track_id] = song
+            playlists = self.get_playlists(cancel_check)
+            for playlist in playlists:
+                if playlist.error:
+                    result.add_failure(playlist.name, playlist.url, playlist.error)
+                elif playlist.skipped_reason:
+                    result.add_note(f'Playlist {playlist.name} skipped: {playlist.skipped_reason}')
+                for song in playlist.songs:
+                    songs.setdefault(song.track_id, song)
+            root = configutils.get_download_path()
+            directories = [os.path.join(root, 'my_songs')] + self._playlist_directories(root, playlists)
+            files = []
+            for directory in dict.fromkeys(directories):
+                if cancel_check():
+                    raise _FetchCancelled()
+                if not os.path.isdir(directory):
+                    continue
+                try:
+                    moved = repair.flatten_nested_tracks(directory)
+                    if moved:
+                        result.add_note(f'Flattened {moved} nested tracks in {directory}.')
+                    for entry in sorted(os.scandir(directory), key=lambda entry: entry.name):
+                        track_id = track_id_from_filename(entry.name)
+                        if entry.is_file() and track_id in songs:
+                            files.append((entry.path, directory, songs[track_id]))
+                except OSError as error:
+                    result.add_failure(directory, None, str(error))
+            if progress_callback:
+                progress_callback(0, len(files), '')
+            rejected = []
+            for done, (path, directory, song) in enumerate(files, 1):
+                if cancel_check():
+                    raise _FetchCancelled()
+                try:
+                    duration = metadatautils.read_duration(path)
+                    if duration is None or not durationcheck.within_tolerance(duration, song.duration_ms, lenient=True):
+                        repair.quarantine(path, directory)
+                        rejected.append(os.path.basename(path))
+                        result.add_success()
+                    elif not metadatautils.has_basic_tags(path):
+                        if not metadatautils.embed_metadata(path, song, embed_art=True):
+                            raise OSError('Could not embed metadata')
+                        result.add_success()
+                    else:
+                        result.add_skipped()
+                except Exception as error:
+                    result.add_failure(os.path.basename(path), song.url, str(error))
+                if progress_callback:
+                    progress_callback(done, len(files), f'{song.artist} - {song.name}')
+            if rejected:
+                result.add_note(f'Quarantined {len(rejected)} wrong-length or unreadable tracks: ' + ', '.join(rejected[:5]) + (' …' if len(rejected) > 5 else ''))
+        except _FetchCancelled:
+            result.cancelled = True
+        except LibraryFetchError as error:
+            result.add_failure('Spotify library', None, str(error))
+        return result

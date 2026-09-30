@@ -19,7 +19,10 @@ class SyncResult:
     skipped_count: int = 0
     errors: List[DownloadError] = field(default_factory=list)
     cancelled: bool = field(default=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    notes: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        self._lock = threading.Lock()
 
     def add_success(self):
         """Increment the success counter (thread-safe)."""
@@ -36,10 +39,27 @@ class SyncResult:
                 error_message=error_message
             ))
 
-    def add_skipped(self):
+    def add_skipped(self, count: int = 1):
         """Increment the skipped counter (thread-safe)."""
         with self._lock:
-            self.skipped_count += 1
+            self.skipped_count += count
+
+    def add_note(self, message: str):
+        with self._lock:
+            self.notes.append(message)
+
+    def merge(self, other: 'SyncResult') -> None:
+        """Merge a coherent snapshot without nesting locks (including self-merge)."""
+        with other._lock:
+            success, failure, skipped = other.success_count, other.failure_count, other.skipped_count
+            errors, notes, cancelled = list(other.errors), list(other.notes), other.cancelled
+        with self._lock:
+            self.success_count += success
+            self.failure_count += failure
+            self.skipped_count += skipped
+            self.errors.extend(errors)
+            self.notes.extend(notes)
+            self.cancelled = self.cancelled or cancelled
 
     @property
     def total(self) -> int:
@@ -53,10 +73,10 @@ class SyncResult:
 
     @property
     def success_rate(self) -> float:
-        """Success rate as a percentage (0-100)."""
-        if self.total == 0:
-            return 0.0
-        return (self.success_count / self.total) * 100
+        """Success percentage among attempted items; skipped items are excluded."""
+        with self._lock:
+            attempts = self.success_count + self.failure_count
+            return self.success_count / attempts * 100 if attempts else 0.0
 
     def get_summary(self) -> str:
         """Get a human-readable summary of the sync result."""
@@ -77,6 +97,11 @@ class SyncResult:
             )
             if len(self.errors) > 10:
                 summary += f"\n... and {len(self.errors) - 10} more errors"
+
+        if self.notes:
+            summary += "\n\nNotes:\n" + "\n".join(f"- {note}" for note in self.notes[:10])
+            if len(self.notes) > 10:
+                summary += f"\n... and {len(self.notes) - 10} more"
 
         return summary
 

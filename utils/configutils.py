@@ -1,101 +1,91 @@
 import configparser
 import os
 from pathlib import Path
+import tempfile
 
-CONFIG_FILE = 'config.ini'
-DEFAULT_DOWNLOAD_PATH = str(Path.home() / 'Music' / 'downloads')
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_FILE = str(_PROJECT_ROOT / 'config.ini')
+TOKEN_CACHE_FILE = str(_PROJECT_ROOT / '.spotipy_cache')
+DEFAULT_DOWNLOAD_PATH = '~/Music/downloads'
 DEFAULT_COOKIES_FILE = ''
+SUPPORTED_AUDIO_FORMATS = ('mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav')
 DEFAULT_AUDIO_FORMAT = 'mp3'
-DEFAULT_AUDIO_PROVIDERS = 'piped youtube'
+DEFAULT_REDIRECT_URI = 'http://127.0.0.1:8888/callback'
 
 
-def ask_download_path():
-    while True:
-        download_path = input("Enter the download path: ")
-        if download_path.strip():
-            return download_path
-        else:
-            print("Invalid input. Please provide a valid download path.")
+def _write_config(config):
+    """Replace the config only after its complete UTF-8 contents are written."""
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         dir=os.path.dirname(os.path.abspath(CONFIG_FILE)),
+                                         delete=False) as file:
+            temp_path = file.name
+            config.write(file)
+        os.replace(temp_path, CONFIG_FILE)
+    finally:
+        if temp_path is not None and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def _ensure_config_exists():
-    """Create config file with defaults if it doesn't exist."""
+    """Create a config with settings and OAuth credentials if absent."""
     if not os.path.exists(CONFIG_FILE):
-        config = configparser.ConfigParser()
+        config = configparser.ConfigParser(interpolation=None)
         config['Settings'] = {
             'download_path': DEFAULT_DOWNLOAD_PATH,
             'cookies_file': DEFAULT_COOKIES_FILE,
+            'audio_format': DEFAULT_AUDIO_FORMAT,
         }
-        with open(CONFIG_FILE, 'w') as f:
-            config.write(f)
+        config['Spotify'] = {
+            'client_id': '',
+            'client_secret': '',
+            'redirect_uri': DEFAULT_REDIRECT_URI,
+        }
+        _write_config(config)
+
+
+def _read_config():
+    _ensure_config_exists()
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(CONFIG_FILE, encoding='utf-8')
+    return config
 
 
 def get_download_path() -> str:
-    """Get download path from config, with fallback to default."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Settings', 'download_path', fallback=DEFAULT_DOWNLOAD_PATH)
+    """Return the configured path with a leading home-directory tilde expanded."""
+    return os.path.expanduser(_read_config().get(
+        'Settings', 'download_path', fallback=DEFAULT_DOWNLOAD_PATH))
 
 
 def get_cookies_file() -> str:
-    """Get cookies file path from config, with fallback to empty string."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Settings', 'cookies_file', fallback=DEFAULT_COOKIES_FILE)
+    return _read_config().get('Settings', 'cookies_file', fallback=DEFAULT_COOKIES_FILE)
 
 
 def get_audio_format() -> str:
-    """Get preferred audio format from config."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Settings', 'audio_format', fallback=DEFAULT_AUDIO_FORMAT)
-
-
-def get_audio_providers() -> str:
-    """Get preferred audio providers for spotdl (space-separated, e.g. 'piped youtube')."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Settings', 'audio_providers', fallback=DEFAULT_AUDIO_PROVIDERS)
+    return _read_config().get('Settings', 'audio_format', fallback=DEFAULT_AUDIO_FORMAT)
 
 
 def get_spotify_client_id() -> str:
-    """Get Spotify client ID from config."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Spotify', 'client_id', fallback='')
+    return _read_config().get('Spotify', 'client_id', fallback='')
 
 
 def get_spotify_client_secret() -> str:
-    """Get Spotify client secret from config."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Spotify', 'client_secret', fallback='')
+    return _read_config().get('Spotify', 'client_secret', fallback='')
 
 
 def get_spotify_redirect_uri() -> str:
-    """Get Spotify redirect URI from config."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-    return config.get('Spotify', 'redirect_uri', fallback='http://localhost')
+    return _read_config().get('Spotify', 'redirect_uri', fallback=DEFAULT_REDIRECT_URI)
+
+
+def get_token_cache_path() -> str:
+    return TOKEN_CACHE_FILE
 
 
 def set_value(section: str, key: str, value: str):
-    """Set a config value and write to disk."""
-    _ensure_config_exists()
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-
+    """Persist a value atomically; an empty string clears the value."""
+    config = _read_config()
     if section not in config:
         config[section] = {}
-
     config[section][key] = value
-
-    with open(CONFIG_FILE, 'w') as f:
-        config.write(f)
+    _write_config(config)

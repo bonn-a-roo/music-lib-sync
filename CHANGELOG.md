@@ -7,6 +7,35 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- Repair Library: flatten nested tracks, quarantine wrong-length/unreadable originals, and tag existing audio with missing basic metadata.
+- Multi-candidate searches, Spotify-duration checks, and verification of decoded output before recording download success.
+- Native tagging and artwork for all six output formats; cached artwork downloads.
+- Blocking-prerequisite checks, download-attempt deadlines, and whole-process-tree cancellation.
+- Offline regressions for authentication, GUI worker failures, retries, safe filenames, repairs, tagging and subprocess shutdown.
+
+### Fixed
+- Unhandled worker exceptions aborting the entire PyQt application.
+- Expired-token browser reauthorization instead of refresh; denied authorization, state validation, and GUI-thread blocking.
+- Slash/template characters in titles creating nested or incorrect filenames.
+- Silent partial Spotify listings and empty-playlist results after fetch failures.
+- Wrong skip counts, resetting playlist progress, and ETA including library-fetch time.
+- Account selection receiving a button boolean as an index and parsing IDs from display names.
+- Ignored audio-format/cookie settings, empty-setting persistence, literal `~` paths, and current-directory-dependent configuration.
+- Missing tags on new downloads, nullable Spotify metadata, invalid numeric tags discarding other metadata, and SyncResult lock serialization/equality.
+- Mixed-encoding/unbounded logs and tests writing into the user's log directory.
+
+### Changed
+- Background authentication and one exception-safe sync/repair worker.
+- Spotify Development Mode ownership restrictions are surfaced as skip notes; item responses accept the current `item` key.
+- Runtime dependencies use current Spotify/yt-dlp APIs; pytest moved to `requirements-dev.txt`.
+- Duration-only matching remains a heuristic; unknown track IDs and existing audio are preserved.
+
+### Removed
+- Unused spotdl and legacy ytdl backends, dead WIP paths and obsolete provider options.
+- Tracked configuration secrets from the local unpushed history; local config remains on disk, untracked. Secret rotation still requires the Spotify dashboard.
+- Editor files from tracking and the stray Windows `nul` artifact; development audio is ignored.
+
 ## [0.5.0] - 2026-06-19
 
 ### Added
@@ -29,12 +58,11 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Fixed
 - Download failures caused by `spotdl`'s `filter_results` rejecting all YouTube search results
 - HTTP 403 on DASH audio formats (`251`/`140`) — resolved by switching to HLS streams
-- yt-dlp updated from 2025-12-08 to 2026-06-09 (fixes YouTube SABR streaming changes)
 
 ## [0.4.0] - 2026-03-31
 
 ### Added
-- Parallel metadata fetching from the Spotify API (album + artist details fetched concurrently)
+- Parallel playlist-item fetching (no separate album/artist enrichment pass).
 - `SyncResult` model — thread-safe accumulator for success/failure/skipped counts and error details
 - `metadatautils` module — embed, read, verify, and export ID3 tags using `mutagen`; supports album art download
 - Test suite: `pytest` with `unit` / `integration` / `slow` markers
@@ -80,8 +108,4 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Initial Spotify library sync: authenticated via spotipy, downloads saved tracks using `spotdl`
 - Basic Tkinter GUI with user account selector
 
-[Unreleased]: https://github.com/your-org/music-lib-sync/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/your-org/music-lib-sync/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/your-org/music-lib-sync/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/your-org/music-lib-sync/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/your-org/music-lib-sync/releases/tag/v0.1.0
+[Unreleased]: https://github.com/bonn-a-roo/music-lib-sync/commits/main/

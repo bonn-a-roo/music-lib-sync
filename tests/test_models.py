@@ -73,14 +73,6 @@ class TestSong:
         assert result == "None - None"
 
     @pytest.mark.unit
-    def test_desc_filename(self):
-        """Test the descriptive filename generation."""
-        song = Song(name="My Song", artist="My Artist")
-        result = song.desc_filename()
-
-        assert result == "My Artist - My Song.mp3"
-
-    @pytest.mark.unit
     def test_spotify_uri_with_track_id(self):
         """Test Spotify URI generation with a track ID."""
         song = Song(track_id="4iV5W9uYEdYUVa79Axb7Rh")
@@ -172,11 +164,22 @@ class TestPlaylist:
         playlist1 = Playlist(name="Playlist 1")
         playlist2 = Playlist(name="Playlist 2")
 
-        # This is a known anti-pattern in Python, but testing current behavior
-        # Note: The current implementation has this issue (mutable default argument)
-        # This test documents the behavior
         playlist1.songs.append(Song(name="Shared Song"))
+        assert playlist2.songs == []
+        assert playlist1.songs[0].name == "Shared Song"
 
-        # Due to mutable default argument, song might be shared
-        # This documents the current implementation
-        assert len(playlist1.songs) >= 1
+
+@pytest.mark.unit
+@pytest.mark.parametrize("track", [None, {}])
+def test_empty_spotify_track(track):
+    assert Song.from_spotify_track(track) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("album", [None, {}, {"images": [{"height": None, "url": "small"}, {"height": 640, "url": "large"}]}])
+def test_nullable_spotify_metadata(album):
+    song = Song.from_spotify_track({"id": "abc", "album": album, "artists": [], "external_urls": None, "external_ids": None})
+    assert song.track_id == "abc"
+    assert song.artist is None
+    assert song.url is None
+    assert song.album_art_url == ("large" if album and album.get("images") else None)

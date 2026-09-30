@@ -1,213 +1,78 @@
-"""
-Tests for configutils.py - Configuration file management.
-"""
+import configparser
 import os
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-
 from utils import configutils
 
-
-class TestEnsureConfigExists:
-    """Tests for _ensure_config_exists function."""
-
-    @pytest.mark.unit
-    def test_creates_config_file_if_not_exists(self, tmp_path):
-        """Test that config file is created if it doesn't exist."""
-        config_file = tmp_path / "test_config.ini"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            # Remove file if it exists
-            if config_file.exists():
-                config_file.unlink()
-
-            configutils._ensure_config_exists()
-
-            assert config_file.exists()
-
-    @pytest.mark.unit
-    def test_does_not_modify_existing_config(self, tmp_path):
-        """Test that existing config is not modified."""
-        config_file = tmp_path / "test_config.ini"
-
-        # Create a config file with custom content
-        with open(config_file, 'w') as f:
-            f.write("[Settings]\n")
-            f.write("download_path = /custom/path\n")
-            f.write("[Custom]\n")
-            f.write("custom_key = custom_value\n")
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-
-            # Verify custom content is preserved
-            with open(config_file, 'r') as f:
-                content = f.read()
-                assert "/custom/path" in content
-                assert "custom_value" in content
+pytestmark = pytest.mark.unit
 
 
-class TestGetDownloadPath:
-    """Tests for get_download_path function."""
-
-    @pytest.mark.unit
-    def test_returns_default_when_config_missing(self, tmp_path):
-        """Test that default path is returned when config doesn't specify."""
-        config_file = tmp_path / "test_config.ini"
-        default_path = tmp_path / "Music" / "downloads"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            with patch.object(configutils, 'DEFAULT_DOWNLOAD_PATH', str(default_path)):
-                if config_file.exists():
-                    config_file.unlink()
-
-                result = configutils.get_download_path()
-                assert result == str(default_path)
-
-    @pytest.mark.unit
-    def test_returns_configured_value(self, tmp_path):
-        """Test that configured value is returned."""
-        config_file = tmp_path / "test_config.ini"
-        custom_path = "/my/custom/path"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Settings', 'download_path', custom_path)
-
-            result = configutils.get_download_path()
-            assert result == custom_path
+@pytest.fixture
+def config_file(tmp_path, monkeypatch):
+    path = tmp_path / 'config.ini'
+    monkeypatch.setattr(configutils, 'CONFIG_FILE', str(path))
+    return path
 
 
-class TestGetCookiesFile:
-    """Tests for get_cookies_file function."""
-
-    @pytest.mark.unit
-    def test_returns_default_empty_string(self, tmp_path):
-        """Test that empty string is returned when not configured."""
-        config_file = tmp_path / "test_config.ini"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            if config_file.exists():
-                config_file.unlink()
-
-            result = configutils.get_cookies_file()
-            assert result == ''
-
-    @pytest.mark.unit
-    def test_returns_configured_cookies_file(self, tmp_path):
-        """Test that configured cookies file path is returned."""
-        config_file = tmp_path / "test_config.ini"
-        cookies_path = "/path/to/cookies.txt"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Settings', 'cookies_file', cookies_path)
-
-            result = configutils.get_cookies_file()
-            assert result == cookies_path
+def test_project_paths_are_absolute_and_cwd_independent(tmp_path, monkeypatch):
+    root = Path(configutils.__file__).resolve().parent.parent
+    monkeypatch.chdir(tmp_path)
+    assert Path(configutils.CONFIG_FILE) == root / 'config.ini'
+    assert Path(configutils.get_token_cache_path()) == root / '.spotipy_cache'
 
 
-class TestSpotifyConfig:
-    """Tests for Spotify configuration getters."""
-
-    @pytest.mark.unit
-    def test_get_spotify_client_id(self, tmp_path):
-        """Test getting Spotify client ID."""
-        config_file = tmp_path / "test_config.ini"
-        client_id = "test_client_id_123"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Spotify', 'client_id', client_id)
-
-            result = configutils.get_spotify_client_id()
-            assert result == client_id
-
-    @pytest.mark.unit
-    def test_get_spotify_client_secret(self, tmp_path):
-        """Test getting Spotify client secret."""
-        config_file = tmp_path / "test_config.ini"
-        client_secret = "test_secret_456"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Spotify', 'client_secret', client_secret)
-
-            result = configutils.get_spotify_client_secret()
-            assert result == client_secret
-
-    @pytest.mark.unit
-    def test_get_spotify_redirect_uri(self, tmp_path):
-        """Test getting Spotify redirect URI."""
-        config_file = tmp_path / "test_config.ini"
-        redirect_uri = "http://127.0.0.1:8888/callback"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Spotify', 'redirect_uri', redirect_uri)
-
-            result = configutils.get_spotify_redirect_uri()
-            assert result == redirect_uri
-
-    @pytest.mark.unit
-    def test_spotify_defaults_to_empty_string(self, tmp_path):
-        """Test that missing Spotify config returns empty string (or localhost for redirect_uri)."""
-        config_file = tmp_path / "test_config.ini"
-
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            if config_file.exists():
-                config_file.unlink()
-
-            assert configutils.get_spotify_client_id() == ''
-            assert configutils.get_spotify_client_secret() == ''
-            # redirect_uri has a different default
-            assert configutils.get_spotify_redirect_uri() == 'http://localhost'
+def test_config_reads_from_other_cwd_with_percent_values(config_file, tmp_path, monkeypatch):
+    other = tmp_path / 'elsewhere'
+    other.mkdir()
+    monkeypatch.chdir(other)
+    configutils.set_value('Settings', 'download_path', '~/Music/100% 中文')
+    configutils.set_value('Settings', 'cookies_file', '100% cookies.txt')
+    configutils.set_value('Spotify', 'client_secret', 'secret%42')
+    assert configutils.get_download_path() == os.path.expanduser('~/Music/100% 中文')
+    assert configutils.get_cookies_file() == '100% cookies.txt'
+    assert configutils.get_spotify_client_secret() == 'secret%42'
+    assert not (other / 'config.ini').exists()
 
 
-class TestSetValue:
-    """Tests for set_value function."""
+def test_default_config_has_credentials_section(config_file):
+    assert configutils.get_download_path() == os.path.expanduser('~/Music/downloads')
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(config_file, encoding='utf-8')
+    assert dict(parser['Spotify']) == {
+        'client_id': '', 'client_secret': '',
+        'redirect_uri': 'http://127.0.0.1:8888/callback'}
 
-    @pytest.mark.unit
-    def test_sets_value_in_existing_section(self, tmp_path):
-        """Test setting a value in an existing section."""
-        config_file = tmp_path / "test_config.ini"
 
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Settings', 'test_key', 'test_value')
+def test_empty_value_clears_and_preserves_other_settings(config_file):
+    configutils.set_value('Settings', 'cookies_file', 'cookies.txt')
+    configutils.set_value('Spotify', 'client_id', 'client')
+    configutils.set_value('Settings', 'cookies_file', '')
+    assert configutils.get_cookies_file() == ''
+    assert configutils.get_spotify_client_id() == 'client'
 
-            result = configutils.get_download_path()
-            # Since we can't directly get test_key, verify file was written
-            assert config_file.exists()
 
-    @pytest.mark.unit
-    def test_creates_new_section_if_not_exists(self, tmp_path):
-        """Test that a new section is created if it doesn't exist."""
-        config_file = tmp_path / "test_config.ini"
+def test_failed_atomic_replace_preserves_original(config_file, monkeypatch):
+    configutils.set_value('Spotify', 'client_id', 'original')
+    before = config_file.read_bytes()
+    def fail_replace(*args):
+        raise OSError('replace denied')
+    monkeypatch.setattr(configutils.os, 'replace', fail_replace)
+    with pytest.raises(OSError):
+        configutils.set_value('Spotify', 'client_id', 'new')
+    assert config_file.read_bytes() == before
+    assert list(config_file.parent.iterdir()) == [config_file]
 
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('NewSection', 'new_key', 'new_value')
 
-            # Verify section and key were created
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(str(config_file))
-            assert 'NewSection' in config
-            assert config['NewSection']['new_key'] == 'new_value'
+def test_existing_config_is_not_overwritten(config_file):
+    text = '[Settings]\ncookies_file = present\n'
+    config_file.write_text(text, encoding='utf-8')
+    configutils._ensure_config_exists()
+    assert config_file.read_text(encoding='utf-8') == text
+    assert configutils.get_spotify_redirect_uri() == 'http://127.0.0.1:8888/callback'
 
-    @pytest.mark.unit
-    def test_overwrites_existing_value(self, tmp_path):
-        """Test that existing values are overwritten."""
-        config_file = tmp_path / "test_config.ini"
 
-        with patch.object(configutils, 'CONFIG_FILE', str(config_file)):
-            configutils._ensure_config_exists()
-            configutils.set_value('Settings', 'download_path', '/path1')
-            configutils.set_value('Settings', 'download_path', '/path2')
-
-            result = configutils.get_download_path()
-            assert result == '/path2'
+@pytest.mark.parametrize('audio_format', ['mp3', 'flac', 'm4a', 'opus', 'ogg', 'wav'])
+def test_audio_format_is_preserved(config_file, audio_format):
+    configutils.set_value('Settings', 'audio_format', audio_format)
+    assert configutils.get_audio_format() == audio_format

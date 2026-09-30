@@ -48,9 +48,6 @@ class Song(Downloadable):
     def __str__(self):
         return f"{self.name} - {self.artist}"
 
-    def desc_filename(self):
-        return f"{self.artist} - {self.name}.mp3"
-
     @property
     def spotify_uri(self):
         """Get the Spotify URI (e.g., spotify:track:...) from track_id."""
@@ -59,7 +56,7 @@ class Song(Downloadable):
         return None
 
     @classmethod
-    def from_spotify_track(cls, track_data: dict) -> 'Song':
+    def from_spotify_track(cls, track_data: dict) -> 'Song | None':
         """
         Create a Song instance from Spotify API track response.
 
@@ -69,38 +66,38 @@ class Song(Downloadable):
         Returns:
             Song instance with all available metadata populated
         """
+        if not track_data:
+            return None
         # Basic track info
         track_id = track_data.get('id')
         name = track_data.get('name')
-        url = track_data.get('external_urls', {}).get('spotify')
+        url = (track_data.get('external_urls') or {}).get('spotify')
 
         # Artist info (primary + all artists)
-        artists = track_data.get('artists', [])
+        artists = [a for a in (track_data.get('artists') or []) if a and a.get('name')]
         artist = artists[0].get('name') if artists else None
         all_artists = [a.get('name') for a in artists] if artists else None
 
         # Album info
-        album = track_data.get('album', {})
+        album = track_data.get('album') or {}
         album_name = album.get('name')
         album_id = album.get('id')
         album_type = album.get('album_type')
         release_date = album.get('release_date')
 
         # Album art - prefer largest image
-        images = album.get('images', [])
+        images = [image for image in (album.get('images') or []) if image and image.get('url')]
         album_art_url = None
         if images:
-            # Sort by height descending to get the largest
-            sorted_images = sorted(images, key=lambda x: x.get('height', 0), reverse=True)
-            album_art_url = sorted_images[0].get('url')
+            album_art_url = max(images, key=lambda image: image.get('height') or 0).get('url')
 
         # Label and copyright
         label = album.get('label')
-        copyrights = album.get('copyrights', [])
+        copyrights = [item for item in (album.get('copyrights') or []) if item]
         copyright_text = copyrights[0].get('text') if copyrights else None
 
         # External IDs (ISRC)
-        external_ids = track_data.get('external_ids', {})
+        external_ids = track_data.get('external_ids') or {}
         isrc = external_ids.get('isrc')
 
         return cls(
