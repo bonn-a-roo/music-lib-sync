@@ -62,7 +62,7 @@ def test_go_uses_current_item_data(environment, monkeypatch):
     monkeypatch.setattr(ui, 'SessionManager', lambda: manager)
     window = ui.MainWindow()
     opened = []
-    monkeypatch.setattr(window, 'open_sync_window', lambda: opened.append(manager.selected))
+    monkeypatch.setattr(window, 'open_library_window', lambda: opened.append(manager.selected))
     window.user_selection.setCurrentIndex(1)
     assert opened == []
     assert window.user_selection.currentText() == 'Bob (the Builder) (id3)'
@@ -192,3 +192,60 @@ def test_auth_runs_off_main_thread_and_manual_dialog_on_main(environment, monkey
     assert worker.wait(1000)
     assert seen == [True, True]
     assert results == ['user']
+
+
+def test_browser_search_presence_filters_and_duplicate_rows(monkeypatch, tmp_path):
+    from ui.library_browser import LibraryBrowser
+    from model.library_state import CollectionKey, CollectionSnapshot, TrackSnapshot
+    rows = (
+        TrackSnapshot('one', 'Same title', 'First artist', 'Album', 61000, 'downloaded'),
+        TrackSnapshot('one', 'Same title', 'First artist', 'Album', 61000, 'downloaded'),
+        TrackSnapshot('two', 'Same title', 'Second artist', 'Other album', 90000, 'missing'),
+        TrackSnapshot('three', 'Recovered', None, None, None, 'quarantined'),
+    )
+    snapshot = CollectionSnapshot(CollectionKey('account', 'saved'), 'Saved tracks',
+                                  str(tmp_path), tracks=rows, scan_complete=True)
+    library = SimpleNamespace(browse_collections=lambda *args, **kwargs: iter([snapshot]))
+    monkeypatch.setattr(ui.configutils, 'get_download_path', lambda: str(tmp_path))
+    window = LibraryBrowser(SimpleNamespace(library=library, get_name=lambda: 'Account'))
+    pump_until(lambda: window.worker is not None and not window.worker.isRunning())
+    assert window.proxy.rowCount() == 4
+    assert '1 / 3 downloaded' in window.summary.text()
+    window.proxy.set_status('Missing')
+    assert window.proxy.rowCount() == 2
+    window.search.setText('second artist')
+    assert window.proxy.rowCount() == 1
+    assert window.proxy.index(0, 2).data() == 'Second artist'
+    window.proxy.set_status('Downloaded')
+    assert window.proxy.rowCount() == 0
+    window.search.clear()
+    assert window.proxy.rowCount() == 2
+    window.close()
+
+
+def test_browser_failed_refresh_preserves_rows_without_synced_claim(monkeypatch, tmp_path):
+    from ui.library_browser import LibraryBrowser
+    from model.library_state import CollectionKey, CollectionSnapshot, TrackSnapshot
+    snapshot = CollectionSnapshot(CollectionKey('account', 'saved'), 'Saved tracks',
+                                  str(tmp_path), tracks=(TrackSnapshot('one', 'Song', 'Artist',
+                                  'Album', 1000, 'downloaded'),), scan_complete=True, refreshed_at=1)
+    def browse(*args, **kwargs):
+        if browse.fail:
+            raise OSError('Spotify unavailable')
+        yield snapshot
+    browse.fail = False
+    monkeypatch.setattr(ui.configutils, 'get_download_path', lambda: str(tmp_path))
+    window = LibraryBrowser(SimpleNamespace(library=SimpleNamespace(browse_collections=browse),
+                                           get_name=lambda: 'Account'))
+    pump_until(lambda: window.worker is not None and not window.worker.isRunning())
+    assert 'Synced' in window.summary.text()
+    browse.fail = True
+    window.refresh()
+    assert 'Synced' not in window.summary.text()
+    pump_until(lambda: not window.worker.isRunning())
+    assert window.model.tracks == snapshot.tracks
+    assert window.current_snapshot().stale
+    assert window.current_snapshot().coverage == 'unknown'
+    assert 'Spotify unavailable' in window.summary.text()
+    assert 'Synced' not in window.summary.text()
+    window.close()

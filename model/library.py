@@ -10,6 +10,7 @@ from spotipy import SpotifyException
 from model.playlist import Playlist
 from model.song import Song
 from model.sync_result import SyncResult
+from model.library_state import CollectionKey, CollectionSnapshot, LocalFileIndex
 from utils import configutils, durationcheck, metadatautils, repair
 from utils.fileutils import sanitize_path_component, track_id_from_filename
 from utils.logutils import get_logger
@@ -42,6 +43,7 @@ class SpotifyLibrary(LibrarySyncSource):
         self.auth = auth
         self._user_id = None
         self._saved_unavailable = 0
+        self._playlist_unavailable = {}
 
     def _spotify_call(self, fn, *args, cancel_check=None, **kwargs):
         """Retry transport/transient API failures without making waits uninterruptible.
@@ -115,11 +117,18 @@ class SpotifyLibrary(LibrarySyncSource):
 
     def _get_playlist_songs(self, playlist_id, cancel_check=None):
         songs = []
+        unavailable = 0
         for items in self._pages(self.auth.playlist_items, 100, cancel_check, playlist_id, additional_types=('track',)):
-            songs.extend(song for item in items if (song := self._song(item)) is not None)
+            for item in items:
+                song = self._song(item)
+                if song is None:
+                    unavailable += 1
+                else:
+                    songs.append(song)
+        self._playlist_unavailable[playlist_id] = unavailable
         return songs
 
-    def get_playlists(self, cancel_check=None):
+    def get_playlist_metadata(self, cancel_check=None):
         if self._user_id is None:
             profile = self._spotify_call(self.auth.current_user, cancel_check=cancel_check)
             self._user_id = profile.get('id') if isinstance(profile, dict) else None
@@ -127,21 +136,72 @@ class SpotifyLibrary(LibrarySyncSource):
                 raise LibraryFetchError('Spotify did not return the current user id')
         items = [item for page in self._pages(self.auth.current_user_playlists, 50, cancel_check) for item in page]
 
-        def fetch(item):
+        playlists = []
+        for item in items:
             playlist = Playlist(name=item.get('name'), url=(item.get('external_urls') or {}).get('spotify'), id=item.get('id'))
             if (item.get('owner') or {}).get('id') != self._user_id and not item.get('collaborative'):
                 playlist.skipped_reason = 'not owned or collaborative; Spotify does not expose its tracks'
-                return playlist
-            try:
-                if not playlist.id:
-                    raise LibraryFetchError('Playlist has no id')
-                playlist.songs = self._get_playlist_songs(playlist.id, cancel_check)
-            except LibraryFetchError as error:
-                playlist.error = str(error)
-            return playlist
+            playlists.append(playlist)
+        return playlists
 
+    def _load_playlist(self, playlist, cancel_check=None):
+        if playlist.skipped_reason:
+            return playlist
+        try:
+            if not playlist.id:
+                raise LibraryFetchError('Playlist has no id')
+            playlist.songs = self._get_playlist_songs(playlist.id, cancel_check)
+        except LibraryFetchError as error:
+            playlist.error = str(error)
+        return playlist
+
+    def get_playlists(self, cancel_check=None):
+        playlists = self.get_playlist_metadata(cancel_check)
         with ThreadPoolExecutor(max_workers=4) as executor:
-            return list(executor.map(fetch, items))
+            return list(executor.map(lambda playlist: self._load_playlist(playlist, cancel_check), playlists))
+
+    def browse_collections(self, download_path, cancel_check=None, selected_key=None):
+        """Yield the complete sidebar before fetching contents; never write files."""
+        root = os.path.abspath(os.path.expanduser(os.fspath(download_path)))
+        playlists = self.get_playlist_metadata(cancel_check)
+        destinations = self._playlist_directories(root, playlists)
+        saved_key = CollectionKey(self._user_id, 'saved')
+        saved_destination = os.path.join(root, 'my_songs')
+        yield CollectionSnapshot(saved_key, 'Saved tracks', saved_destination, metadata='not_loaded')
+        for playlist, destination in zip(playlists, destinations):
+            yield CollectionSnapshot(CollectionKey(self._user_id, playlist.id or ''), playlist.name or 'Untitled playlist', destination,
+                                     metadata='restricted' if playlist.skipped_reason else 'not_loaded', error=playlist.skipped_reason)
+        if cancel_check and cancel_check():
+            return
+        index = LocalFileIndex(root, cancel_check)
+        if cancel_check and cancel_check():
+            return
+        try:
+            songs = self.get_saved_tracks(cancel_check)
+            yield CollectionSnapshot(saved_key, 'Saved tracks', saved_destination,
+                                     tracks=index.reconcile(songs, saved_destination), skipped_count=self._saved_unavailable,
+                                     error=index.error, refreshed_at=time.time(), scan_complete=index.complete)
+        except LibraryFetchError as error:
+            yield CollectionSnapshot(saved_key, 'Saved tracks', saved_destination, metadata='error', error=str(error))
+        pending = list(zip(playlists, destinations))
+        while pending:
+            priority = selected_key() if callable(selected_key) else selected_key
+            if priority is not None:
+                pending.sort(key=lambda pair: CollectionKey(self._user_id, pair[0].id or '') != priority)
+            playlist, destination = pending.pop(0)
+            if cancel_check and cancel_check():
+                return
+            if playlist.skipped_reason:
+                continue
+            self._load_playlist(playlist, cancel_check)
+            key = CollectionKey(self._user_id, playlist.id or '')
+            if playlist.error:
+                yield CollectionSnapshot(key, playlist.name or 'Untitled playlist', destination, metadata='error', error=playlist.error)
+            else:
+                yield CollectionSnapshot(key, playlist.name or 'Untitled playlist', destination,
+                                         tracks=index.reconcile(playlist.songs, destination),
+                                         skipped_count=self._playlist_unavailable.get(playlist.id, 0),
+                                         error=index.error, refreshed_at=time.time(), scan_complete=index.complete)
 
     def _get_downloaded_track_ids(self, directory):
         if not os.path.isdir(directory):

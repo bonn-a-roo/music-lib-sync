@@ -25,6 +25,8 @@ def _fmt_duration(seconds):
 
 
 class OptionsWindow(QWidget):
+    saved = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Options')
@@ -69,6 +71,7 @@ class OptionsWindow(QWidget):
             QMessageBox.critical(self, 'Could not save options', str(exc))
             return
         self.status_label.setText('Saved.')
+        self.saved.emit()
         QTimer.singleShot(2000, lambda: self.status_label.setText(''))
 
 
@@ -110,6 +113,11 @@ class SyncWorker(QThread):
 
 
 class SyncWindow(QWidget):
+    options_saved = pyqtSignal()
+    closed = pyqtSignal()
+    operation_started = pyqtSignal()
+    operation_finished = pyqtSignal()
+
     def __init__(self, selected_user):
         super().__init__()
         self.selected_user = selected_user
@@ -175,6 +183,8 @@ class SyncWindow(QWidget):
         worker.failed.connect(self.on_sync_failed)
         worker.progress.connect(self.on_progress)
         worker.log_line.connect(self.append_log)
+        worker.finished.connect(self.operation_finished.emit)
+        self.operation_started.emit()
         self._sync_start = None
         self._progress_state = (0, 0)
         self.progress_bar.setRange(0, 0)
@@ -262,10 +272,14 @@ class SyncWindow(QWidget):
                 event.ignore()
                 return
         event.accept()
+        if self.options_window:
+            self.options_window.close()
+        self.closed.emit()
 
     def open_options_window(self):
         if not self.options_window:
             self.options_window = OptionsWindow()
+            self.options_window.saved.connect(self.options_saved.emit)
         self.options_window.show()
 
 
@@ -369,16 +383,19 @@ class MainWindow(QMainWindow):
         if user_id is None:
             return
         self.session_manager.set_session_id(user_id)
-        self.open_sync_window()
+        self.open_library_window()
 
-    def open_sync_window(self):
+    def open_library_window(self):
+        from ui.library_browser import LibraryBrowser
         selected = self.session_manager.get_selected_user()
         if selected:
-            self.setCentralWidget(SyncWindow(selected))
+            self.setCentralWidget(LibraryBrowser(selected))
+            self.resize(1200, 800)
 
     def closeEvent(self, event):
         widget = self.centralWidget()
-        if isinstance(widget, SyncWindow) and not widget.close():
+        from ui.library_browser import LibraryBrowser
+        if isinstance(widget, (SyncWindow, LibraryBrowser)) and not widget.close():
             event.ignore()
             return
         if self.auth_thread and self.auth_thread.isRunning():

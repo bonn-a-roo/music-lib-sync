@@ -1,6 +1,19 @@
-# Roadmap
+# Backlog — music-lib-sync
 
-Planned improvements, roughly ordered by priority. Items move to CHANGELOG.md when shipped.
+The existing feature list was migrated from the root roadmap; the media-library UI redesign was added on 2026-09-30 at the user's request and takes priority before further feature development. All unchecked items are planned, not implemented. Record shipped changes in [../CHANGELOG.md](../CHANGELOG.md) and update [spec.md](spec.md) and [session-resume.md](session-resume.md).
+
+## Current priority — modern media-library UI
+
+Design and acceptance criteria: [ADR-0001](adr/adr-0001-media-library-ui.md). The minimal dark/cyan preview was approved on 2026-09-30. State contracts and the read-only production browser are implemented; integrated scoped work and playback remain pending. All stages below are required for the first complete redesigned release.
+
+- [x] Create, refine and review the concrete visual mockup; dark surfaces and restrained cyan accents approved.
+- [x] Finalize collection/track state transitions, local-file reconciliation and structured worker-event contracts; legacy sync event emission remains part of integration.
+- [x] Build a read-only library browser: playlist sidebar, Saved tracks, track table, local presence/counts, search and status filters.
+- [ ] Integrate scoped sync, live collection/track activity, queue, retry, cancellation and repair.
+- [ ] Add local-file playback with persistent controls and verified format support.
+- [ ] Verify end-to-end desktop behavior and replace obsolete UI paths; update implemented-behavior documentation.
+
+Coverage and activity are separate: a partially downloaded playlist may be idle or downloading. Synced requires a complete successfully reconciled snapshot. Restricted or failed Spotify listings must not appear synced. Preserve existing audio and quarantined originals.
 
 ## Near term
 

@@ -300,3 +300,120 @@ def test_cancel_before_next_spotify_page(auth):
     assert result.cancelled
     assert result.failure_count == 0
     assert auth.current_user_saved_tracks.call_count == 1
+
+
+def test_browser_sidebar_precedes_tracks_and_uses_full_collision_set(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_playlists.return_value = page([playlist('first1'), playlist('second2')])
+    browser = SpotifyLibrary(auth).browse_collections(tmp_path, selected_key=CollectionKey('me', 'second2'))
+    sidebar = [next(browser) for _ in range(3)]
+    assert [entry.metadata for entry in sidebar] == ['not_loaded'] * 3
+    auth.current_user_saved_tracks.assert_not_called()
+    auth.playlist_items.assert_not_called()
+    assert [Path(entry.destination).name for entry in sidebar[1:]] == ['Mix [first1]', 'Mix [second]']
+    loaded = list(browser)
+    assert [entry.key.collection_id for entry in loaded] == ['saved', 'second2', 'first1']
+    assert not tmp_path.joinpath('my_songs').exists()
+
+
+def test_browser_unique_counts_and_unavailable_rows(auth, tmp_path):
+    auth.current_user_saved_tracks.return_value = page([{'track': track('one')}, {'track': track('one')}, {'track': track('two')}, {'track': None}])
+    destination = tmp_path / 'my_songs'
+    destination.mkdir()
+    (destination / 'one [one].flac').write_bytes(b'audio')
+    before = {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    snapshot = list(SpotifyLibrary(auth).browse_collections(tmp_path))[-1]
+    assert [row.track_id for row in snapshot.tracks] == ['one', 'one', 'two']
+    assert (snapshot.eligible_count, snapshot.downloaded_count, snapshot.missing_count, snapshot.skipped_count) == (2, 1, 1, 1)
+    assert snapshot.coverage == 'partial'
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+
+
+def test_browser_removed_quarantined_elsewhere_and_temporary(auth, tmp_path):
+    auth.current_user_saved_tracks.return_value = page([{'track': track(id)} for id in ('removed', 'bad', 'else', 'temp', 'unsupported')])
+    rejected = tmp_path / 'my_songs' / '_rejected'
+    rejected.mkdir(parents=True)
+    (rejected / 'bad [bad].mp3').write_bytes(b'bad')
+    elsewhere = tmp_path / 'playlists' / 'Old name'
+    elsewhere.mkdir(parents=True)
+    (elsewhere / 'else [else].opus').write_bytes(b'audio')
+    (rejected.parent / 'temp [temp].mp3.part').write_bytes(b'partial')
+    (rejected.parent / 'unsupported [unsupported].aac').write_bytes(b'audio')
+    removed = rejected.parent / 'removed [removed].mp3'
+    removed.write_bytes(b'audio')
+    library = SpotifyLibrary(auth)
+    assert list(library.browse_collections(tmp_path))[-1].downloaded_count == 1
+    removed.unlink()
+    snapshot = list(library.browse_collections(tmp_path))[-1]
+    assert [row.presence for row in snapshot.tracks] == ['missing', 'quarantined', 'missing', 'missing', 'missing']
+    assert snapshot.tracks[2].elsewhere_path == str(elsewhere / 'else [else].opus')
+    assert snapshot.downloaded_count == 0
+    assert (rejected / 'bad [bad].mp3').exists()
+
+
+def test_browser_empty_restricted_and_fetch_error_not_synced(auth, tmp_path):
+    auth.current_user_playlists.return_value = page([playlist('restricted', owner='other'), playlist('broken')])
+    auth.playlist_items.side_effect = SpotifyException(403, -1, 'forbidden')
+    snapshots = list(SpotifyLibrary(auth).browse_collections(tmp_path))
+    assert next(entry for entry in snapshots if entry.key.collection_id == 'restricted').status == 'Restricted'
+    assert next(entry for entry in snapshots if entry.key.collection_id == 'saved' and entry.metadata == 'ready').status == 'Empty'
+    broken = snapshots[-1]
+    assert (broken.metadata, broken.coverage, broken.status) == ('error', 'unknown', 'Error')
+
+
+def test_browser_scan_error_and_stale_snapshot_are_unknown(auth, tmp_path, monkeypatch):
+    from dataclasses import replace
+    auth.current_user_saved_tracks.return_value = page([{'track': track()}])
+    def inaccessible(root, onerror, followlinks):
+        onerror(PermissionError('inaccessible'))
+        return iter(())
+    monkeypatch.setattr('model.library_state.os.walk', inaccessible)
+    snapshot = list(SpotifyLibrary(auth).browse_collections(tmp_path))[-1]
+    assert snapshot.tracks[0].presence == 'unknown'
+    assert snapshot.coverage == 'unknown'
+    assert snapshot.status == 'Error'
+    assert snapshot.error == 'inaccessible'
+    stale = replace(snapshot, scan_complete=True, stale=True)
+    assert stale.coverage == 'unknown'
+
+
+def test_worker_events_require_real_success_and_reject_obsolete_scope(tmp_path):
+    from model.library_state import CollectionKey, WorkerEvent
+    key = CollectionKey('me', 'saved')
+    with pytest.raises(ValueError, match='existing final file'):
+        WorkerEvent('new', key, 'success', track_id='abc', final_path=str(tmp_path / 'absent.mp3'))
+    final = tmp_path / 'audio.mp3'
+    final.write_bytes(b'audio')
+    event = WorkerEvent('new', key, 'success', track_id='abc', final_path=str(final))
+    assert event.belongs_to('new', key)
+    assert not event.belongs_to('old', key)
+    assert not event.belongs_to('new', CollectionKey('other', 'saved'))
+    with pytest.raises(ValueError, match='Failure requires'):
+        WorkerEvent('new', key, 'failure')
+
+
+def test_browser_playlist_unavailable_count_is_separate_from_coverage(auth, tmp_path):
+    auth.current_user_playlists.return_value = page([playlist('owned')])
+    auth.playlist_items.return_value = page([{'track': track('one')}, {'track': None}, {'track': track('local', is_local=True)}])
+    snapshot = list(SpotifyLibrary(auth).browse_collections(tmp_path))[-1]
+    assert (snapshot.eligible_count, snapshot.missing_count, snapshot.skipped_count) == (1, 1, 2)
+    assert snapshot.status == 'Not downloaded'
+
+
+def test_immutable_snapshot_loading_and_stale_cannot_claim_synced():
+    from dataclasses import FrozenInstanceError, replace
+    from model.library_state import CollectionKey, CollectionSnapshot, TrackSnapshot
+    row = TrackSnapshot('one', 'One', 'Artist', None, None, 'downloaded', 'file.mp3')
+    snapshot = CollectionSnapshot(CollectionKey('me', 'saved'), 'Saved tracks', 'destination', tracks=[row], scan_complete=True)
+    assert snapshot.status == 'Synced'
+    assert isinstance(snapshot.tracks, tuple)
+    with pytest.raises(FrozenInstanceError):
+        snapshot.stale = True
+    assert replace(snapshot, stale=True).status == 'Unknown'
+    assert replace(snapshot, metadata='loading').status == 'Loading'
+    assert replace(snapshot, metadata='error').coverage == 'unknown'
+    assert replace(snapshot, operation='downloading').status == 'Downloading'
+    assert replace(snapshot, operation='cancelling').status == 'Cancelling'
+    assert replace(snapshot, outcome='failed').status == 'Failed'
+    assert replace(snapshot, operation='downloading', metadata='restricted').status == 'Restricted'
+    assert replace(snapshot, error='Storage unavailable').status == 'Error'

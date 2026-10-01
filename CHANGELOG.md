@@ -8,6 +8,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- Read-only PyQt library browser with Saved tracks/playlist navigation, background metadata and local-file reconciliation, track search/presence filters and retained batch sync/repair access.
+- Immutable collection/track snapshots and structured operation-event contracts separating metadata freshness, local coverage and transfer activity.
 - Repair Library: flatten nested tracks, quarantine wrong-length/unreadable originals, and tag existing audio with missing basic metadata.
 - Multi-candidate searches, Spotify-duration checks, and verification of decoded output before recording download success.
 - Native tagging and artwork for all six output formats; cached artwork downloads.
@@ -30,6 +32,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Spotify Development Mode ownership restrictions are surfaced as skip notes; item responses accept the current `item` key.
 - Runtime dependencies use current Spotify/yt-dlp APIs; pytest moved to `requirements-dev.txt`.
 - Duration-only matching remains a heuristic; unknown track IDs and existing audio are preserved.
+- Reorganized documentation into specification, runbook, backlog, session handoff, ADR index and area guidance under `docs/`, following fallas-nfc's structure; replaced the root roadmap with `docs/backlog.md`.
 
 ### Removed
 - Unused spotdl and legacy ytdl backends, dead WIP paths and obsolete provider options.
