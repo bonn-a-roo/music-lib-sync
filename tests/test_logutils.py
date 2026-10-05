@@ -54,11 +54,18 @@ def test_unusable_directory_falls_back_to_console(isolated_logger, monkeypatch, 
 
 
 def test_pythonw_skips_console(isolated_logger, monkeypatch):
-    parent, _ = isolated_logger
+    parent, path = isolated_logger
     monkeypatch.setattr(logutils.sys, 'stdout', None)
+    # Pytest may attach capture handlers between fixture setup and the test.
+    # Check only handlers installed by the application, not the harness.
+    existing_handlers = parent.handlers[:]
     logutils.get_logger('pythonw').info('file only')
-    assert len(parent.handlers) == 1
-    assert isinstance(parent.handlers[0], RotatingFileHandler)
+    added_handlers = [handler for handler in parent.handlers
+                      if handler not in existing_handlers]
+    assert len(added_handlers) == 1
+    assert isinstance(added_handlers[0], RotatingFileHandler)
+    added_handlers[0].flush()
+    assert 'file only' in (path / 'music-sync.log').read_text(encoding='utf-8')
 
 
 def test_console_replaces_unencodable_characters(isolated_logger, monkeypatch):
