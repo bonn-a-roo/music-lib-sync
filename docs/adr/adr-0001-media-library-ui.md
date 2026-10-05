@@ -1,8 +1,8 @@
 # ADR-0001 — Media-library desktop UI
 
 - Date: 2026-09-30
-- Status: Accepted product/visual direction on 2026-09-30. The user approved the revised minimal dark layout with restrained cyan accents. Library-first browsing and local playback in the first complete redesigned release are confirmed. State/snapshot/event contracts are implemented and offline-validated; playback backend remains a proposal requiring format verification.
-- Implementation: Read-only PyQt browser, immutable state/event contracts and filesystem reconciliation implemented. Existing batch sync/repair remains accessible separately. Structured events are not emitted by legacy sync yet; scoped integration, queue and playback are pending. The [interactive visual preview](../design/README.md) remains the approved complete-release visual reference.
+- Status: Accepted product/visual direction on 2026-09-30. The user approved the revised minimal dark layout with restrained cyan accents. Library-first browsing and local playback in the first complete redesigned release are confirmed. State/snapshot/event contracts are implemented and offline-validated; the playback codec fallback is recorded in [ADR-0002](adr-0002-local-playback-decoding.md), with Computer Use/audio-output verification pending.
+- Implementation: Read-only PyQt browsing, immutable state/event contracts, filesystem reconciliation, scoped sync, Sync all and explicit whole-library browser Repair Library are implemented. The browser uses one active mutation queue, stable-ID sync events, cancellation and post-repair reconciliation. Existing batch paths remain accessible during validation; final cutover and playback verification remain pending. The local player implementation is in place. Legacy batch sync/repair do not emit structured per-track events. The [interactive visual preview](../design/README.md) remains the approved complete-release visual reference.
 - Related work: [backlog](../backlog.md), [session handoff](../session-resume.md).
 
 ## Goal
@@ -25,9 +25,9 @@ These are implementation checkpoints, not reduced-scope releases. The first comp
 
 - `ui/uimanager.py` currently contains account/auth, Options and a separate SyncWindow with batch buttons, aggregate progress, bounded logs and result dialogs.
 - `SpotifyLibrary.get_playlists()` fetches playlist metadata and contents together. Restricted playlists carry a skip reason; individual fetch failures carry an error. Saved tracks are fetched separately.
-- Sync entrypoints currently download saved tracks or all playlists. There is no public single-playlist or selected-track sync operation.
-- Worker progress is `(current, total, name)`, not a stable track/playlist event stream. It cannot reliably drive individual row states, especially when titles repeat.
-- Local presence is currently a directory-scoped set of track IDs. Playlist paths depend on safe names and collision suffixes. No persistent catalog or playback engine exists.
+- Batch sync entrypoints download saved tracks or all playlists; `SpotifyLibrary.sync_collection` supports one collection and optional selected track IDs. Browser Sync all queues those collection jobs; browser Repair Library queues the existing whole-library repair implementation.
+- Legacy batch worker progress remains `(current, total, name)`, not a stable track/playlist event stream. Scoped sync adds operation-scoped WorkerEvents; global repair uses aggregate progress and rescans to reconcile rows.
+- Local presence is currently a directory-scoped set of track IDs. Playlist paths depend on safe names and collision suffixes. No persistent catalog exists; local playback is in-memory and uses the codec fallback recorded in ADR-0002.
 - Song already carries title, artists, album, artwork URL, Spotify duration and track ID. Playlist has ID, name, songs, skip reason and error, but no artwork field.
 
 Reuse authentication, downloader verification, naming, tagging, repair and cancellation. Stay on Python/PyQt5; a web/Electron migration is not needed for this design.
@@ -125,11 +125,11 @@ Cancel selected queued work or the active job with clear scope. Preserve full-pr
 
 ## Local playback
 
-Recommended backend: PyQt5 QtMultimedia (`QMediaPlayer`) behind a small playback controller. Validate native Windows codec support before committing to it. FFmpeg availability for downloading does not prove Qt can decode every output format.
+Playback uses PyQt5 QtMultimedia (`QMediaPlayer`) behind the controller described in [ADR-0002](adr-0002-local-playback-decoding.md). In this Windows environment Qt loaded MP3/WAV but rejected FLAC/M4A/Opus/Ogg; FFmpeg decodes those formats into bounded temporary WAV files. FFmpeg availability alone is not format validation; repeat the generated-audio check on the target desktop and verify audible output.
 
-Playback uses an existing local path, never a Spotify URL or an implicit download. Double-click a playable row or use its Play action. Support play/pause, previous/next, seek, elapsed/total time and volume. Build the playback queue from downloaded tracks in the selected list in displayed order; selection changes do not silently replace an active queue. Keep playback controls persistent across playlist navigation.
+Playback uses an existing local path, never a Spotify URL or an implicit download. Double-click a playable row or use the persistent player controls. The queue follows playable rows in the selected collection's displayed order and survives navigation. The QtMultimedia/FFmpeg fallback and bounded temporary WAV behavior are defined in ADR-0002. Missing files and decoder errors produce actionable feedback without changing download success history. Repair and batch mutations wait for the Qt player and decoder to release source files before moving them.
 
-Verify mp3/flac/m4a/opus/ogg/wav on the target environment. If Qt cannot cover the supported formats, document evidence and select an alternative backend/dependency before declaring playback complete; do not silently drop formats. Missing files and decoder errors produce actionable feedback without crashing or changing download success history. Coordinate repair of the currently playing file: stop/release the media before moving it, rather than racing file handles.
+Generated temporary-audio tests cover mp3/flac/m4a/opus/ogg/wav, but target-desktop audible output, keyboard/high-DPI rendering and lifetime edge cases still require Computer Use; do not test with user audio.
 
 ## Implementation phases and gates
 
@@ -137,7 +137,7 @@ Verify mp3/flac/m4a/opus/ogg/wav on the target environment. If Qt cannot cover t
 
 - Completed: interactive visual mockup and restrained-cyan revision, approved by the user on 2026-09-30. Use [the preview](../design/README.md) as the visual reference.
 - Carry the preview's theme tokens, responsive layout and control hierarchy into Qt; verify keyboard/focus behavior in the actual desktop UI.
-- Completed: immutable collection/track state, unique-ID coverage with duplicate rows, read-only reconciliation and validated operation-scoped WorkerEvent payloads. Transfer/outcome/playback fields remain independent; read-only snapshots do not invent mutation outcomes.
+- Completed: immutable collection/track state, unique-ID coverage with duplicate rows, read-only reconciliation and validated operation-scoped WorkerEvent payloads. Transfer/outcome/playback fields remain independent; read-only snapshots do not invent mutation outcomes. Scoped sync now emits events; legacy batch operations still do.
 - Offline contract validation passed for loading, empty, restricted, failed/stale snapshots, duplicate IDs, missing/quarantined/elsewhere files, scan failures and obsolete operation scope. Live provider behavior and playback backend support remain separate gates.
 
 ### 2. Read-only library browser
@@ -149,15 +149,14 @@ Verify mp3/flac/m4a/opus/ogg/wav on the target environment. If Qt cannot cover t
 
 ### 3. Integrated sync and repair
 
-- Add selected-collection and selected-track commands and structured job/track events.
-- Wire queue, live badges, coverage updates, cancellation, retry and Details panel.
-- Migrate existing batch entrypoints and keep settings/auth/repair available; remove obsolete sync windows once replacement flows are complete.
-- Gate: exercise partial success, repeated titles, duplicate IDs, skip, provider failure, cancellation during fetch/download, changing selection during work and safe close. Repair preserves originals and updates row presence.
+- Implemented: selected-collection missing sync, selected-track download, retry of failed still-missing tracks, Sync all across ready/accessible collections, and confirmed whole-library Repair Library. One active mutation queue serializes these jobs with captured destinations, cancellation and background reconciliation. The existing batch window remains available.
+- Pending: exercise the complete auth-to-library and repair/sync flow on desktop, then retire obsolete batch paths only after replacement flows pass their safety gates. Repair reports aggregate progress/results and relies on a full rescan for row truth; legacy batch paths remain available.
+- Gate: continue exercising partial success, repeated titles, duplicate IDs, skip, provider failure, cancellation during fetch/download, changing selection during work and safe close. Repair must preserve originals and update row presence.
 
 ### 4. Playback
 
-- Prove backend/format support, then integrate the persistent player and playlist queue.
-- Gate: real temporary audio in all supported formats; play/pause, seek, next/previous, volume, unavailable files, decoder failure, navigation during playback and repair/file-handle coordination. Do not test with user audio.
+- Implemented: persistent QtMultimedia controls and collection queue, with asynchronous FFmpeg-to-WAV fallback for Qt codec gaps; see ADR-0002. Generated temporary-audio tests exercise all six formats and duplicate queue occurrences.
+- Pending gate: use Computer Use on the target desktop to inspect player rendering and audible output, play/pause, seek, next/previous, volume, unavailable files, decoder failure, navigation during playback, window close and repair/file-handle coordination. Do not test with user audio.
 
 ### 5. End-to-end cutover
 

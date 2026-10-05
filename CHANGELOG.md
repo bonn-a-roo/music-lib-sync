@@ -8,6 +8,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- Browser-scoped missing/selected sync, retry, Sync all across accessible collections and confirmed whole-library Repair Library through a serialized queue; stable per-track sync activity, cancellation, captured roots and post-repair rescan. Existing batch paths remain available during validation.
+- Persistent local playback queue and transport controls with asynchronous FFmpeg-to-temporary-WAV fallback for Qt codec gaps; supports existing library paths only and quiesces before repair.
 - Read-only PyQt library browser with Saved tracks/playlist navigation, background metadata and local-file reconciliation, track search/presence filters and retained batch sync/repair access.
 - Immutable collection/track snapshots and structured operation-event contracts separating metadata freshness, local coverage and transfer activity.
 - Repair Library: flatten nested tracks, quarantine wrong-length/unreadable originals, and tag existing audio with missing basic metadata.
@@ -17,6 +19,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Offline regressions for authentication, GUI worker failures, retries, safe filenames, repairs, tagging and subprocess shutdown.
 
 ### Fixed
+- Scoped sync preserves verified output across duplicate-job cancellation, isolates progress callback errors, reclassifies unverified success results and emits terminal cancellation even when cleanup fails.
+- Browser repair/sync cannot race an already-open batch window; repair confirmation is rechecked after modal events and failed final queued jobs trigger a deferred reconciliation.
+- Playback stops/awaits Qt media and FFmpeg process release before repair, batch mutation or safe window close.
+- Playback errors are short and actionable (file name plus "damaged or unsupported"; the raw FFmpeg/Qt detail goes to the log) and no longer widen the sidebar; Enter plays the selected row and Space pauses/resumes from the keyboard; narrow windows keep the Status column and the collection status line visible.
+- Position slider now seeks on click, drag and keyboard (previously only handle drags emitted a seek); sliders use the cyan theme, table headers align with their cells and stray focus rectangles were removed.
+- Pythonw logging regression test now excludes pytest capture handlers and verifies file output, with and without test capture.
 - Unhandled worker exceptions aborting the entire PyQt application.
 - Expired-token browser reauthorization instead of refresh; denied authorization, state validation, and GUI-thread blocking.
 - Slash/template characters in titles creating nested or incorrect filenames.

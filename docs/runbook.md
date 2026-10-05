@@ -52,11 +52,13 @@ Authentication runs in a background thread. Cached tokens are refreshed before o
 ## Syncing and repairing
 
 1. Select the account and click **Go**.
-   The library browser opens after **Go**. Select Saved tracks or a playlist to inspect ordered tracks and destination-local coverage. Search and filters affect only the displayed collection. **Refresh library** rescans existing files without modifying them; **Open folder** opens an existing destination only. **Details** explains listing/scan errors. Downloaded denotes filename-ID presence, not verified recording identity.
-   Click **Sync / repair** to open the existing batch controls below. Scoped browser downloads, queue and playback are not connected yet.
+   The library browser opens after **Go**. Select Saved tracks or a playlist to inspect ordered tracks and destination-local coverage. Search and filters affect only the displayed collection. **Refresh library** rescans existing files without modifying them; **Open folder** opens an existing destination only. **Details** explains listing/scan errors and scoped-job results. Downloaded denotes filename-ID presence, not verified recording identity.
+   **Sync missing** targets missing/quarantined tracks in the selected collection. Select rows and use **Download selected**, use **Retry failed** for failed tracks still missing, or **Sync all** to queue missing tracks from every accessible, fully scanned collection. Restricted, failed, incomplete, empty and already-complete collections are excluded and counted separately. Scoped sync does not flatten or repair existing files.
+   **Repair Library** is an explicit, confirmed whole-library operation in the same queue. It may flatten nested track folders, quarantine invalid files under `_rejected`, and add missing tags; originals are preserved. It reports aggregate progress and rescans the library when complete.
+   Only one mutation runs at a time; additional requests queue. **Cancel jobs** cancels the active job and clears queued requests. Closing the browser requests cancellation and waits. The destination root is fixed when each request is queued; the browser rescans after the queue drains. **Sync / repair** retains the batch controls for all-songs/all-playlists sync and repair until the browser replacements pass end-to-end checks. Double-click an available local track to play it; the persistent footer keeps the current collection queue while navigating. Unsupported Qt codecs use FFmpeg to create a bounded temporary WAV; the original is not changed and playback never starts a download. Final audible/desktop verification with Computer Use is pending.
 2. **Sync Songs** writes saved tracks into `<download_path>/my_songs`.
 3. **Sync Playlists** writes accessible playlists into `<download_path>/playlists/<safe name>`; colliding names receive playlist-ID suffixes.
-4. **Repair Library** fixes existing files before you resume sync:
+4. **Repair Library** (browser action or retained batch window) fixes existing files before you resume sync:
    - Flattens nested track folders left by older filename bugs.
    - Moves unreadable or grossly wrong-length files into that directory's `_rejected` folder, preserving the original for inspection/recovery.
    - Writes missing title/artist metadata, including available Spotify album information and artwork.

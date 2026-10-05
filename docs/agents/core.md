@@ -1,12 +1,12 @@
 # Core and configuration guidance
 
 - `main.py`: creates QApplication/MainWindow and installs exception reporting hooks.
-- `model/library.py`: LibrarySyncSource/SpotifyLibrary; complete-or-error pagination, cancellable Spotify retries, ownership-aware playlists, safe directory naming, dedupe, aggregate progress and repair. `sync_songs` and `sync_playlists` require an injected Downloader. `LibraryFetchError` reports incomplete listings.
+- `model/library.py`: LibrarySyncSource/SpotifyLibrary; complete-or-error pagination, cancellable Spotify retries, ownership-aware playlists, safe directory naming, dedupe, aggregate progress and repair. `sync_songs` and `sync_playlists` require an injected Downloader; `sync_collection` plans selected collection/track IDs through the same destination rules, does not implicitly repair/move existing files, and emits operation-scoped WorkerEvents. `repair_library` accepts a captured `download_path`; browser Repair Library uses aggregate progress then reconciles by rescanning. `LibraryFetchError` reports incomplete listings.
 - `model/song.py` / `playlist.py`: nullable Spotify metadata handling; Playlist carries ID, skip reason or fetch error.
 - `model/sync_result.py`: thread-safe success/failure/skipped counts, DownloadError records, notes and merging. The lock is not a dataclass field; equality/serialization compare only result data. Success rate excludes skipped items.
-- `model/library_state.py`: immutable account/collection keys, ordered track snapshots, independent metadata/coverage/operation state and validated WorkerEvent payloads. Unique-ID counts retain duplicate rows. WorkerEvent is not yet emitted by legacy sync; `belongs_to` rejects obsolete operation/collection scopes.
+- `model/library_state.py`: immutable account/collection keys, ordered track snapshots, independent metadata/coverage/operation state and validated WorkerEvent payloads. Unique-ID counts retain duplicate rows. Scoped `sync_collection` emits WorkerEvents; legacy batch sync does not yet. `belongs_to` rejects obsolete operation/collection scopes.
 - `SpotifyLibrary.browse_collections`: sidebar metadata first, Saved tracks then selected-priority playlist contents; read-only local index uses the shared destination resolver. Supported top-level files satisfy current-destination coverage; elsewhere and quarantined paths are distinct. Failed/incomplete scans imply unknown coverage, never successful absence.
-- `model/downloader.py`: slim abstract download/cancel/is_cancelled interface and preflight contract.
+- `model/downloader.py`: download/cancel/is_cancelled interface, preflight contract and optional per-track callback. The callback reports downloading/success/failure/skip/cancelled with track identity; success requires an existing verified final file.
 - `utils/configutils.py`: project-root config/cache paths, interpolation-free config reads, home expansion and atomic writes.
 - `utils/logutils.py`: one shared `mls` parent logger with UTF-8 rotating file handler and safe console output. `MUSIC_LIB_SYNC_LOG_DIR` overrides the default log directory.
 

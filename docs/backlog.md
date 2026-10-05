@@ -4,14 +4,16 @@ The existing feature list was migrated from the root roadmap; the media-library 
 
 ## Current priority — modern media-library UI
 
-Design and acceptance criteria: [ADR-0001](adr/adr-0001-media-library-ui.md). The minimal dark/cyan preview was approved on 2026-09-30. State contracts and the read-only production browser are implemented; integrated scoped work and playback remain pending. All stages below are required for the first complete redesigned release.
+Design and acceptance criteria: [ADR-0001](adr/adr-0001-media-library-ui.md). The minimal dark/cyan preview was approved on 2026-09-30. State contracts, read-only browsing, scoped sync, Sync all, confirmed whole-library browser repair and the first local playback implementation are in place; Computer Use validation and end-to-end cutover remain pending. All stages below are required for the first complete redesigned release.
 
 - [x] Create, refine and review the concrete visual mockup; dark surfaces and restrained cyan accents approved.
 - [x] Finalize collection/track state transitions, local-file reconciliation and structured worker-event contracts; legacy sync event emission remains part of integration.
 - [x] Build a read-only library browser: playlist sidebar, Saved tracks, track table, local presence/counts, search and status filters.
-- [ ] Integrate scoped sync, live collection/track activity, queue, retry, cancellation and repair.
-- [ ] Add local-file playback with persistent controls and verified format support.
-- [ ] Verify end-to-end desktop behavior and replace obsolete UI paths; update implemented-behavior documentation.
+- [x] Integrate scoped missing/selected-track sync, live collection/track activity, queue, retry and cancellation; retain batch sync/repair access.
+- [x] Add browser Sync all for accessible collections and confirmed whole-library Repair Library through the serialized job queue; retain batch paths during validation.
+- [x] Add persistent local-file playback controls and a verified Qt/FFmpeg fallback path for the six supported formats using generated temporary audio.
+- [x] Computer Use verification of audible output, player controls, queue/navigation, cancellation/repair file release and narrow-window rendering with generated audio.
+- [ ] Verify high-DPI scaling, Tab order/screen readers and live Spotify/yt-dlp runs; then complete the end-to-end cutover and retire obsolete batch UI paths.
 
 Coverage and activity are separate: a partially downloaded playlist may be idle or downloading. Synced requires a complete successfully reconciled snapshot. Restricted or failed Spotify listings must not appear synced. Preserve existing audio and quarantined originals.
 

@@ -2,7 +2,7 @@
 
 Interactive visual proposal: [media-library.html](media-library.html). Design contract: [ADR-0001](../adr/adr-0001-media-library-ui.md).
 
-This is a browser-based design artifact, not an application frontend or a framework migration. It uses fictional tracks and placeholder artwork. No Spotify requests, file operations, downloads or audio playback occur. Controls change simulated state or explain proposed actions. The production application now has a read-only PyQt browser using this visual direction; integrated sync/activity and playback remain pending.
+This is a browser-based design artifact, not an application frontend or a framework migration. It uses fictional tracks and placeholder artwork. No Spotify requests, file operations, downloads or audio playback occur. Controls change simulated state or explain proposed actions. The production application now has read-only PyQt browsing, scoped sync, Sync all, queued whole-library Repair Library and a persistent local player using this visual direction; Computer Use/audio-output and end-to-end cutover remain pending.
 
 ## Visual revision — restrained cyan
 

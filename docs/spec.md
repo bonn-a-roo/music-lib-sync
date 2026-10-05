@@ -11,15 +11,24 @@ A Python/PyQt5 desktop application reads Spotify saved tracks and playlists as m
 - Select an account and authenticate, then open the sync window.
 - Sync saved tracks into `<download_path>/my_songs`.
 - Sync accessible playlists into `<download_path>/playlists/<safe name>`; colliding names receive playlist-ID suffixes.
+- In the library browser, sync missing tracks for the selected collection, download selected rows, retry failed tracks that remain missing, or queue Sync all across accessible collections. Browse other collections while work continues.
+- Run confirmed whole-library Repair Library from the browser or use the retained batch window for all-songs/all-playlists sync and repair.
+- Double-click an available local track to play it; use persistent play/pause, previous/next, seek and volume controls. Playback never downloads or streams from Spotify.
 - Repair existing library files, then sync again to replace quarantined tracks.
 - Edit destination, cookies and output format in Options.
 - Cancel active work; closing an active window requests cancellation and waits rather than destroying a running thread.
 
 Authentication is background work. Cached tokens are validated/refreshed before browser authorization. Denial, callback errors and timeouts are reported in the GUI. Required scopes: `user-library-read playlist-read-private playlist-read-collaborative`.
 
-### Read-only library browser
+### Library browser and scoped sync
 
-After account selection, the library browser presents Saved tracks and playlists in a sidebar, with an ordered model/view track table, collection-local search and presence filters. Metadata retrieval and filesystem reconciliation run in a background worker; browsing does not download, create directories, move files or write tags. **Sync / repair** retains the existing batch operations until scoped browser actions replace them. Local playback and integrated queue/transfer activity remain unimplemented.
+After account selection, the library browser presents Saved tracks and playlists in a sidebar, with an ordered model/view track table, collection-local search and presence filters. Metadata retrieval and filesystem reconciliation run in a background worker; browsing alone does not download, create directories, move files or write tags.
+
+**Sync missing**, **Download selected** and **Retry failed** enqueue operation-scoped jobs for the selected collection. There is one active library mutation job and an explicit queue; selection/navigation does not change a job's scope. Stable operation, collection and track IDs drive live row state, including duplicate playlist rows. Late events from older jobs are ignored. **Cancel jobs** drops queued work and requests cancellation of the active downloader. The destination root is captured when a job is queued, and the library is rescanned after the queue drains. A track is marked Downloaded only after the downloader verifies an existing final file in the collection's current destination.
+
+Sync missing and Sync all do not implicitly flatten, retag or repair existing files. Repair Library is an explicit whole-library operation in the same serialized queue; it captures the destination root, reports aggregate progress/results, invalidates coverage while running, then rescans to show repaired/quarantined files. The retained batch window remains available for all-songs/all-playlists sync and repair.
+
+Local playback uses existing paths only, with a persistent queue built from playable rows in the selected collection's displayed order; navigating collections does not replace the queue. QtMultimedia provides controls and output. In this Windows environment it rejected FLAC/M4A/Opus/Ogg, so [ADR-0002](adr/adr-0002-local-playback-decoding.md) records the FFmpeg fallback: asynchronous decode to a bounded temporary WAV without changing the source. Repair and batch mutations wait asynchronously for playback/decoder file release. The position slider seeks on click, drag and keyboard; Enter plays the selected row and Space toggles pause from the keyboard. Playback failures show a short message naming the file, with technical detail in the log. Generated-audio checks cover all six formats and Computer Use passes exercised playback, pause, seek, next/previous, rapid switching, repair (including a native MP3 being moved while playing), Sync all, cancellation, keyboard use, narrow windows and close; high-DPI scaling and screen readers remain unverified.
 
 Coverage counts unique eligible Spotify track IDs while preserving repeated playlist occurrences as rows. Only supported final files in the collection's current destination satisfy Downloaded coverage. Files elsewhere can be reported separately; `_rejected` originals do not satisfy coverage. Presence is not recording-identity or decoded-audio validation. Empty, restricted, failed, stale and incomplete snapshots must not appear Synced.
 
@@ -33,7 +42,7 @@ Results accumulate success, failure, skipped items, error details, notes and can
 
 ## Downloads and metadata
 
-An injected Downloader supplies download, cancel, cancellation-state and preflight behavior. YoutubeDownloader searches multiple candidates, filters using Spotify duration, verifies output duration, then embeds metadata. Deadlines and cancellation terminate full subprocess trees.
+An injected Downloader supplies download, cancel, cancellation-state and preflight behavior, plus an optional per-track callback for scoped sync. The callback carries stable Song identity and reports active/terminal phases; success requires the verified final file to exist. YoutubeDownloader searches multiple candidates, filters using Spotify duration, verifies output duration, then embeds metadata. Deadlines and cancellation terminate full subprocess trees.
 
 Native tags/artwork support MP3/WAV ID3, FLAC/Vorbis/Opus and MP4. ID3 uses v2.3; artwork downloads are cached. Spotify metadata can be nullable. Duration matching rejects previews and obvious length mismatches but cannot establish recording identity.
 
