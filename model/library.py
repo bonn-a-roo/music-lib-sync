@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import uuid
 
 import requests
 from spotipy import SpotifyException
@@ -10,7 +11,7 @@ from spotipy import SpotifyException
 from model.playlist import Playlist
 from model.song import Song
 from model.sync_result import SyncResult
-from model.library_state import CollectionKey, CollectionSnapshot, LocalFileIndex
+from model.library_state import CollectionKey, CollectionSnapshot, LocalFileIndex, WorkerEvent
 from utils import configutils, durationcheck, metadatautils, repair
 from utils.fileutils import sanitize_path_component, track_id_from_filename
 from utils.logutils import get_logger
@@ -128,12 +129,16 @@ class SpotifyLibrary(LibrarySyncSource):
         self._playlist_unavailable[playlist_id] = unavailable
         return songs
 
-    def get_playlist_metadata(self, cancel_check=None):
+    def _current_user_id(self, cancel_check=None):
         if self._user_id is None:
             profile = self._spotify_call(self.auth.current_user, cancel_check=cancel_check)
             self._user_id = profile.get('id') if isinstance(profile, dict) else None
             if not self._user_id:
                 raise LibraryFetchError('Spotify did not return the current user id')
+        return self._user_id
+
+    def get_playlist_metadata(self, cancel_check=None):
+        self._current_user_id(cancel_check)
         items = [item for page in self._pages(self.auth.current_user_playlists, 50, cancel_check) for item in page]
 
         playlists = []
@@ -203,10 +208,19 @@ class SpotifyLibrary(LibrarySyncSource):
                                          skipped_count=self._playlist_unavailable.get(playlist.id, 0),
                                          error=index.error, refreshed_at=time.time(), scan_complete=index.complete)
 
-    def _get_downloaded_track_ids(self, directory):
+    @staticmethod
+    def _get_downloaded_track_paths(directory):
         if not os.path.isdir(directory):
-            return set()
-        return {track_id for entry in os.scandir(directory) if entry.is_file() and (track_id := track_id_from_filename(entry.name))}
+            return {}
+        paths = {}
+        for entry in sorted(os.scandir(directory), key=lambda item: item.name.casefold()):
+            track_id = track_id_from_filename(entry.name) if entry.is_file() else None
+            if track_id:
+                paths.setdefault(track_id, entry.path)
+        return paths
+
+    def _get_downloaded_track_ids(self, directory):
+        return set(self._get_downloaded_track_paths(directory))
 
     @staticmethod
     def _playlist_directories(download_path, playlists):
@@ -225,6 +239,173 @@ class SpotifyLibrary(LibrarySyncSource):
                 new.append(song)
                 seen.add(song.track_id)
         return new
+
+    def _collection_plan(self, collection_key, download_path, cancel_check=None):
+        account_id = self._current_user_id(cancel_check)
+        if collection_key.account_id != account_id:
+            raise LibraryFetchError('Selected collection belongs to a different Spotify account')
+        if collection_key.collection_id == 'saved':
+            songs = self.get_saved_tracks(cancel_check)
+            return ('Saved tracks', os.path.join(download_path, 'my_songs'), songs,
+                    self._saved_unavailable)
+
+        playlists = self.get_playlist_metadata(cancel_check)
+        index = next((i for i, playlist in enumerate(playlists)
+                      if playlist.id == collection_key.collection_id), None)
+        if index is None:
+            raise LibraryFetchError('Selected playlist is no longer available in this Spotify library')
+        playlist = playlists[index]
+        if playlist.skipped_reason:
+            raise LibraryFetchError(f'Playlist {playlist.name} is restricted: {playlist.skipped_reason}')
+        self._load_playlist(playlist, cancel_check)
+        if playlist.error:
+            raise LibraryFetchError(playlist.error)
+        destination = self._playlist_directories(download_path, playlists)[index]
+        return (playlist.name or 'Untitled playlist', destination, playlist.songs,
+                self._playlist_unavailable.get(playlist.id, 0))
+
+    def sync_collection(self, collection_key, downloader, download_path=None, track_ids=None,
+                        progress_callback=None, event_callback=None, operation_id=None):
+        """Sync missing tracks for one collection through the injected downloader.
+
+        ``download_path`` is captured by the caller when the job is queued, so
+        changing Options cannot redirect an operation already in flight.
+        """
+        result = SyncResult()
+        operation_id = operation_id or uuid.uuid4().hex
+
+        def emit(phase, track_id=None, completed=0, total=0, final_path=None,
+                 error=None, reason=None):
+            if event_callback is None:
+                return
+            try:
+                event_callback(WorkerEvent(operation_id, collection_key, phase,
+                                           track_id=track_id, completed=completed, total=total,
+                                           final_path=final_path, error=error, reason=reason))
+            except Exception:
+                logger.warning('Could not emit collection activity event', exc_info=True)
+
+        name = 'Selected collection'
+        emit('syncing')
+        try:
+            if downloader.is_cancelled():
+                raise _FetchCancelled()
+            root = os.path.abspath(os.path.expanduser(os.fspath(
+                configutils.get_download_path() if download_path is None else download_path)))
+            name, directory, songs, unavailable = self._collection_plan(
+                collection_key, root, downloader.is_cancelled)
+            if unavailable:
+                result.add_skipped(unavailable)
+                result.add_note(f'Skipped {unavailable} unavailable, local, or id-less entries.')
+            if downloader.is_cancelled():
+                raise _FetchCancelled()
+
+            requested = None if track_ids is None else tuple(dict.fromkeys(tid for tid in track_ids if tid))
+            if requested == ():
+                return result
+            requested_set = None if requested is None else set(requested)
+            unique_songs = []
+            seen = set()
+            duplicate_count = 0
+            for song in songs:
+                if not song.track_id or requested_set is not None and song.track_id not in requested_set:
+                    continue
+                if song.track_id in seen:
+                    duplicate_count += 1
+                    continue
+                seen.add(song.track_id)
+                unique_songs.append(song)
+            if duplicate_count:
+                result.add_skipped(duplicate_count)
+            missing_requested = [track_id for track_id in (requested or ()) if track_id not in seen]
+            for track_id in missing_requested:
+                result.add_skipped()
+                emit('skip', track_id=track_id, reason='Track is no longer present in this Spotify collection')
+
+            if not unique_songs:
+                if missing_requested:
+                    result.add_note('Some selected tracks are no longer present in Spotify.')
+                return result
+
+            os.makedirs(directory, exist_ok=True)
+            # Scoped sync is not Repair Library: leave legacy nested user files
+            # untouched and plan coverage from the top-level destination only.
+            existing_paths = self._get_downloaded_track_paths(directory)
+            new_songs = []
+            completed_before_download = len(missing_requested)
+            total_tracks = len(unique_songs) + len(missing_requested)
+            for song in unique_songs:
+                path = existing_paths.get(song.track_id)
+                if path:
+                    result.add_skipped()
+                    completed_before_download += 1
+                    emit('skip', track_id=song.track_id, final_path=path,
+                         reason='Already present in this collection destination')
+                else:
+                    new_songs.append(song)
+            if duplicate_count:
+                result.add_note(f'Deduplicated {duplicate_count} repeated track occurrences for this sync.')
+
+            invalid_successes = []
+            invalid_successes_lock = threading.Lock()
+
+            def report_track(song, phase, final_path=None, detail=None):
+                if phase == 'downloading':
+                    emit('downloading', track_id=song.track_id)
+                elif phase == 'success':
+                    if not final_path or not os.path.isfile(final_path):
+                        error = 'Downloader reported success without an existing final file'
+                        with invalid_successes_lock:
+                            invalid_successes.append((song, error))
+                        emit('failure', track_id=song.track_id, error=error)
+                    else:
+                        emit('success', track_id=song.track_id, final_path=final_path)
+                elif phase == 'failure':
+                    emit('failure', track_id=song.track_id,
+                         error=detail or 'Download failed')
+                elif phase == 'skip':
+                    emit('skip', track_id=song.track_id, final_path=final_path,
+                         reason=detail or 'Skipped by downloader')
+                elif phase == 'cancelled':
+                    emit('cancelled', track_id=song.track_id, reason=detail)
+
+            if new_songs and not downloader.is_cancelled():
+                def report_progress(done, _total, _name):
+                    completed = min(total_tracks, completed_before_download + done)
+                    emit('downloading', completed=completed, total=total_tracks)
+                    if progress_callback:
+                        try:
+                            progress_callback(completed, total_tracks, '')
+                        except Exception:
+                            logger.warning('Scoped sync progress callback failed', exc_info=True)
+
+                downloaded = downloader.download(new_songs, directory,
+                                                 progress_callback=report_progress,
+                                                 track_callback=report_track)
+                with invalid_successes_lock:
+                    rejected = tuple(invalid_successes)
+                for song, error in rejected:
+                    downloaded.reclassify_success_as_failure(str(song), song.url, error)
+                result.merge(downloaded)
+            if downloader.is_cancelled():
+                result.cancelled = True
+        except _FetchCancelled:
+            result.cancelled = True
+        except (LibraryFetchError, OSError) as error:
+            result.add_failure(name, None, str(error))
+        except Exception as error:
+            logger.exception('Scoped sync failed for %s', name)
+            result.add_failure(name, None, str(error))
+        finally:
+            result.cancelled |= downloader.is_cancelled()
+            if result.cancelled:
+                emit('cancelled')
+            elif result.has_failures:
+                failure = result.errors[0].error_message if result.errors else 'One or more tracks failed'
+                emit('failure', error=failure)
+            else:
+                emit('success')
+        return result
 
     def sync_songs(self, downloader, progress_callback=None):
         result = SyncResult()
@@ -302,7 +483,7 @@ class SpotifyLibrary(LibrarySyncSource):
         result.cancelled |= downloader.is_cancelled()
         return result
 
-    def repair_library(self, progress_callback=None, cancel_check=None):
+    def repair_library(self, progress_callback=None, cancel_check=None, download_path=None):
         result = SyncResult()
         cancel_check = cancel_check or (lambda: False)
         songs = {}
@@ -318,7 +499,8 @@ class SpotifyLibrary(LibrarySyncSource):
                     result.add_note(f'Playlist {playlist.name} skipped: {playlist.skipped_reason}')
                 for song in playlist.songs:
                     songs.setdefault(song.track_id, song)
-            root = configutils.get_download_path()
+            root = os.path.abspath(os.path.expanduser(os.fspath(
+                configutils.get_download_path() if download_path is None else download_path)))
             directories = [os.path.join(root, 'my_songs')] + self._playlist_directories(root, playlists)
             files = []
             for directory in dict.fromkeys(directories):

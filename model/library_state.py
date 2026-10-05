@@ -1,6 +1,6 @@
-"""Immutable browsing state and future mutation-event payloads.
+"""Immutable browsing snapshots and operation-scoped mutation event payloads.
 
-WorkerEvent is a contract only; legacy sync callbacks do not emit it.
+Scoped collection sync emits WorkerEvents; legacy batch sync remains unstructured.
 """
 from dataclasses import dataclass
 import os
@@ -79,6 +79,8 @@ class CollectionSnapshot:
             return self.operation.capitalize()
         if self.outcome == 'failed':
             return 'Failed'
+        if self.outcome == 'cancelled':
+            return 'Cancelled'
         if self.metadata in ('not_loaded', 'loading'):
             return 'Loading'
         if self.coverage == 'unknown':

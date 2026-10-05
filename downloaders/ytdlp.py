@@ -51,6 +51,8 @@ class YoutubeDownloader(Downloader):
         self._cancel_event = threading.Event()
         self._running_processes = set()
         self._process_lock = threading.Lock()
+        self._track_locks = {}
+        self._track_locks_lock = threading.Lock()
         self._protected_files = set()
 
     @staticmethod
@@ -209,14 +211,18 @@ class YoutubeDownloader(Downloader):
                     self._running_processes.discard(proc)
         return result
 
+    @staticmethod
+    def _path_key(path):
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+
     def _cleanup(self, final_path, remove_final=False):
         final = Path(final_path)
         stem = final.stem
         for path in final.parent.iterdir():
-            if (path != final and str(path) not in self._protected_files and path.is_file()
+            if (path != final and self._path_key(path) not in self._protected_files and path.is_file()
                     and path.name.startswith(stem + '.') and _LEFTOVER.search(path.name)):
                 path.unlink(missing_ok=True)
-        if remove_final and str(final) not in self._protected_files:
+        if remove_final and self._path_key(final) not in self._protected_files:
             final.unlink(missing_ok=True)
 
     @staticmethod
@@ -234,18 +240,56 @@ class YoutubeDownloader(Downloader):
         return (f'no candidate matched duration {bounds[0]:g}-{bounds[1]:g}s'
                 if bounds else 'no downloadable search candidate found')
 
-    def _download_song(self, song, download_path, result):
+    def _download_song(self, song, download_path, result, track_callback=None):
         final = os.path.join(download_path, song_filename(song.artist, song.name, song.track_id, ext=self.audio_format))
-        # Existing library files belong to the user; never overwrite/delete/tag them.
-        if os.path.isfile(final):
-            if not self.is_cancelled():
-                if within_tolerance(metadatautils.read_duration(final), song.duration_ms):
-                    result.add_skipped()
-                else:
-                    result.add_failure(str(song), song.url, 'existing audio has wrong duration; repair required')
-            return
-        reason = self._duration_reason(song)
+        lock_key = self._path_key(final)
+        with self._track_locks_lock:
+            track_lock = self._track_locks.setdefault(lock_key, threading.Lock())
+        with track_lock:
+            self._download_song_locked(song, download_path, result, track_callback)
+
+    def _download_song_locked(self, song, download_path, result, track_callback=None):
+        final = os.path.join(download_path, song_filename(song.artist, song.name, song.track_id, ext=self.audio_format))
+
+        def notify(phase, path=None, detail=None):
+            if track_callback is None:
+                return
+            try:
+                track_callback(song, phase, path, detail)
+            except Exception:
+                # Activity reporting must never turn a verified download into a failure.
+                logger.warning('Track activity callback failed for %s', song.track_id, exc_info=True)
+
+        terminal_reported = False
+        preserve_final = False
+
+        def cancelled():
+            nonlocal terminal_reported
+            if not terminal_reported:
+                notify('cancelled', None, 'Download cancelled')
+                terminal_reported = True
+
         try:
+            if self.is_cancelled():
+                cancelled()
+                return
+            # Existing library files belong to the user; never overwrite/delete/tag them.
+            if os.path.isfile(final):
+                if self.is_cancelled():
+                    cancelled()
+                elif within_tolerance(metadatautils.read_duration(final), song.duration_ms):
+                    result.add_skipped()
+                    notify('skip', final, 'Already present and passed duration validation')
+                    terminal_reported = True
+                else:
+                    reason = 'existing audio has wrong duration; repair required'
+                    result.add_failure(str(song), song.url, reason)
+                    notify('failure', None, reason)
+                    terminal_reported = True
+                return
+
+            notify('downloading')
+            reason = self._duration_reason(song)
             for label, query, use_hls in _STRATEGIES:
                 if self.is_cancelled():
                     break
@@ -294,6 +338,12 @@ class YoutubeDownloader(Downloader):
                                 logger.warning('Metadata embedding failed for %s', final, exc_info=True)
                         self._cleanup(final)
                         result.add_success()
+                        preserve_final = True
+                        # Protect a verified output from another queued occurrence of
+                        # the same track if cancellation arrives before it starts.
+                        self._protected_files.add(self._path_key(final))
+                        notify('success', final, None)
+                        terminal_reported = True
                         return
                     reason = attempt.reason or f'yt-dlp produced no {self.audio_format.upper()} file'
                     self._cleanup(final)
@@ -301,26 +351,44 @@ class YoutubeDownloader(Downloader):
                 logger.error('Download failed for %s: %s', song, reason)
                 self._log(f'ERROR: {song}: {reason}')
                 result.add_failure(str(song), song.url, reason)
+                notify('failure', None, reason)
+                terminal_reported = True
         except Exception as exc:
             if not self.is_cancelled():
                 logger.exception('Download failed for %s', song)
                 result.add_failure(str(song), song.url, str(exc))
+                notify('failure', None, str(exc))
+                terminal_reported = True
         finally:
-            self._cleanup(final, remove_final=self.is_cancelled())
+            was_cancelled = self.is_cancelled()
+            try:
+                self._cleanup(final, remove_final=was_cancelled and not preserve_final)
+            except Exception as error:
+                logger.warning('Could not clean temporary output for %s: %s', song.track_id, error)
+                if not was_cancelled and not terminal_reported:
+                    result.add_failure(str(song), song.url, str(error))
+                    notify('failure', None, str(error))
+                    terminal_reported = True
+            finally:
+                if was_cancelled:
+                    cancelled()
 
-    def download(self, songs, download_path, progress_callback=None) -> SyncResult:
+    def download(self, songs, download_path, progress_callback=None, track_callback=None) -> SyncResult:
         result = SyncResult()
         if not songs:
             return result
         os.makedirs(download_path, exist_ok=True)
-        self._protected_files = {str(path) for path in Path(download_path).iterdir()
+        self._protected_files = {self._path_key(path) for path in Path(download_path).iterdir()
                                  if path.is_file() and track_id_from_filename(path.name)}
         self._sweep(download_path)
         total = len(songs)
         if progress_callback:
             progress_callback(0, total, '')
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = {pool.submit(self._download_song, song, download_path, result): song for song in songs}
+            if track_callback is None:
+                futures = {pool.submit(self._download_song, song, download_path, result): song for song in songs}
+            else:
+                futures = {pool.submit(self._download_song, song, download_path, result, track_callback): song for song in songs}
             for done, future in enumerate(as_completed(futures), 1):
                 future.result()
                 song = futures[future]

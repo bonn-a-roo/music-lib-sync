@@ -10,7 +10,13 @@ class Downloader(ABC):
 
     @abstractmethod
     def download(self, songs: list[Song], download_path: str,
-                 progress_callback: Callable[[int, int, str], None] | None = None) -> SyncResult:
+                 progress_callback: Callable[[int, int, str], None] | None = None,
+                 track_callback: Callable[[Song, str, str | None, str | None], None] | None = None) -> SyncResult:
+        """Download songs and optionally report per-track status/path/reason.
+
+        Track phases are downloading, success, failure, skip or cancelled. A
+        success callback is emitted only after the verified final file exists.
+        """
         pass
 
     @abstractmethod

@@ -184,6 +184,63 @@ def test_progress_order_and_empty(tmp_path, song, downloader, monkeypatch):
     assert calls == [(0, 2, ''), (1, 2, 'Other - Second'), (2, 2, 'Artist - Title')]
 
 
+def test_track_callback_reports_verified_success_with_song_identity(tmp_path, song, downloader, monkeypatch):
+    final, _ = install_download(monkeypatch, downloader, song, tmp_path, [200])
+    monkeypatch.setattr(metadatautils, 'embed_metadata', lambda *args, **kwargs: True)
+    events = []
+    result = downloader.download([song], str(tmp_path), track_callback=lambda *event: events.append(event))
+    assert result.success_count == 1
+    assert [(item.track_id, phase) for item, phase, _, _ in events] == [
+        ('abc123', 'downloading'), ('abc123', 'success')]
+    assert events[-1][2] == str(final) and Path(events[-1][2]).is_file()
+
+
+def test_track_callback_reports_failure_and_preserves_original(tmp_path, song, downloader, monkeypatch):
+    final = tmp_path / song_filename(song.artist, song.name, song.track_id)
+    final.write_bytes(b'user original')
+    monkeypatch.setattr(metadatautils, 'read_duration', lambda path: 30, raising=False)
+    events = []
+    result = downloader.download([song], str(tmp_path), track_callback=lambda *event: events.append(event))
+    assert result.failure_count == 1
+    assert [(phase, path) for _, phase, path, _ in events] == [('failure', None)]
+    assert 'repair required' in events[0][3]
+    assert final.read_bytes() == b'user original'
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+@pytest.mark.parametrize('dot_path', [False, True])
+def test_cancel_after_verified_duplicate_preserves_completed_file(
+        tmp_path, song, downloader, monkeypatch, workers, dot_path):
+    downloader.workers = workers
+    final, _ = install_download(monkeypatch, downloader, song, tmp_path, [200])
+    monkeypatch.setattr(metadatautils, 'embed_metadata', lambda *args, **kwargs: True)
+    events = []
+    def track_event(item, phase, path, detail):
+        events.append((phase, path))
+        if phase == 'success':
+            downloader.cancel()
+    download_path = str(tmp_path) + os.sep + '.' if dot_path else str(tmp_path)
+    result = downloader.download([song, song], download_path, track_callback=track_event)
+    assert result.cancelled
+    assert result.success_count == 1
+    assert final.is_file()
+    assert events[0] == ('downloading', None)
+    assert events[1][0] == 'success' and Path(events[1][1]) == final
+    assert ('cancelled', None) in events
+
+
+def test_cleanup_error_does_not_suppress_terminal_cancel_event(tmp_path, song, downloader, monkeypatch):
+    monkeypatch.setattr(downloader, '_cleanup', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('file locked')))
+    events = []
+    def track_event(item, phase, path, detail):
+        events.append(phase)
+        if phase == 'downloading':
+            downloader.cancel()
+    result = downloader.download([song], str(tmp_path), track_callback=track_event)
+    assert result.cancelled and result.failure_count == 0
+    assert events == ['downloading', 'cancelled']
+
+
 def test_preflight_all_problem_sources(tmp_path, downloader, monkeypatch):
     monkeypatch.setattr(ytdlp.shutil, 'which', lambda name: None)
     monkeypatch.setattr(ytdlp.Path, 'home', lambda: tmp_path)

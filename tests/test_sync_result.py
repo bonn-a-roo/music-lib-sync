@@ -68,6 +68,13 @@ def test_reciprocal_merge_does_not_deadlock():
     assert (first.total, second.total) in {(3, 3), (3, 5), (4, 3)}
 
 
+def test_reclassify_success_as_failure_keeps_result_count_truthful():
+    result = SyncResult(success_count=2)
+    result.reclassify_success_as_failure('broken', 'spotify:track:broken', 'missing output')
+    assert (result.success_count, result.failure_count, result.total) == (1, 1, 2)
+    assert result.errors[0] == DownloadError('broken', 'spotify:track:broken', 'missing output')
+
+
 def test_summary_includes_bounded_errors_notes_and_cancel():
     result = SyncResult(cancelled=True)
     result.add_success()

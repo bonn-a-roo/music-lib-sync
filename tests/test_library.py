@@ -8,6 +8,7 @@ from spotipy import SpotifyException
 from model.library import LibraryFetchError, SpotifyLibrary
 from model.sync_result import SyncResult
 from utils import repair
+from utils.fileutils import song_filename
 
 pytestmark = pytest.mark.unit
 
@@ -32,12 +33,17 @@ class FakeDownloader:
     def is_cancelled(self):
         return self.cancelled
 
-    def download(self, songs, directory, progress_callback=None):
+    def download(self, songs, directory, progress_callback=None, track_callback=None):
         self.calls.append((songs, directory))
         result = SyncResult()
         if progress_callback:
             progress_callback(0, len(songs), '')
         for done, song in enumerate(songs, 1):
+            if track_callback:
+                track_callback(song, 'downloading', None, None)
+                path = Path(directory) / song_filename(song.artist, song.name, song.track_id)
+                path.write_bytes(b'audio')
+                track_callback(song, 'success', str(path), None)
             result.add_success()
             if progress_callback:
                 progress_callback(done, len(songs), song.name)
@@ -230,6 +236,27 @@ def test_repair_quarantines_tags_and_preserves_unknown(auth, tmp_path, monkeypat
     assert any('preview' in note for note in result.notes)
 
 
+def test_repair_library_honors_captured_destination_root(auth, tmp_path, monkeypatch):
+    root_a, root_b = tmp_path / 'configured', tmp_path / 'captured'
+    auth.current_user_saved_tracks.return_value = page([{'track': track('repairme')}])
+    configured = root_a / 'my_songs'
+    captured = root_b / 'my_songs'
+    configured.mkdir(parents=True)
+    captured.mkdir(parents=True)
+    configured_file = configured / 'original [repairme].mp3'
+    captured_file = captured / 'original [repairme].mp3'
+    configured_file.write_bytes(b'configured original')
+    captured_file.write_bytes(b'captured original')
+    monkeypatch.setattr('model.library.configutils.get_download_path', lambda: str(root_a))
+    monkeypatch.setattr('model.library.metadatautils.read_duration', lambda path: 30)
+    result = SpotifyLibrary(auth).repair_library(download_path=root_b)
+    assert result.success_count == 1
+    assert configured_file.read_bytes() == b'configured original'
+    rejected = captured / '_rejected' / captured_file.name
+    assert rejected.read_bytes() == b'captured original'
+    assert captured_file.exists() is False
+
+
 def test_quarantine_never_overwrites(tmp_path):
     source = tmp_path / 'x [abc].mp3'
     source.write_bytes(b'first')
@@ -415,5 +442,118 @@ def test_immutable_snapshot_loading_and_stale_cannot_claim_synced():
     assert replace(snapshot, operation='downloading').status == 'Downloading'
     assert replace(snapshot, operation='cancelling').status == 'Cancelling'
     assert replace(snapshot, outcome='failed').status == 'Failed'
+    assert replace(snapshot, outcome='cancelled').status == 'Cancelled'
     assert replace(snapshot, operation='downloading', metadata='restricted').status == 'Restricted'
     assert replace(snapshot, error='Storage unavailable').status == 'Error'
+
+
+def test_scoped_sync_uses_full_collision_set_and_deduplicates_ids(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_playlists.return_value = page([
+        playlist('one123', 'Mix'), playlist('two456', 'Mix')])
+    auth.playlist_items.return_value = page([
+        {'track': track('same', name='Same title')},
+        {'track': track('same', name='Same title')},
+        {'track': track('other', name='Same title')},
+        {'track': track('unselected', name='Other')},
+    ])
+    downloader = FakeDownloader()
+    events = []
+    library = SpotifyLibrary(auth)
+    result = library.sync_collection(
+        CollectionKey('me', 'two456'), downloader, download_path=tmp_path,
+        track_ids=('same', 'other', 'same'), event_callback=events.append, operation_id='scoped-1')
+
+    destination = tmp_path / 'playlists' / 'Mix [two456]'
+    assert downloader.calls[0][1] == str(destination)
+    assert [song.track_id for song in downloader.calls[0][0]] == ['same', 'other']
+    assert result.success_count == 2
+    assert result.skipped_count == 1
+    assert {event.track_id for event in events if event.phase == 'success' and event.track_id} == {'same', 'other'}
+    assert all(event.belongs_to('scoped-1', CollectionKey('me', 'two456')) for event in events)
+    assert events[0].phase == 'syncing' and events[-1].phase == 'success'
+    assert all(event.final_path and Path(event.final_path).is_file()
+               for event in events if event.phase == 'success' and event.track_id)
+
+
+def test_scoped_sync_skips_supported_existing_formats_and_reports_path(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_saved_tracks.return_value = page([{'track': track('already')}])
+    directory = tmp_path / 'my_songs'
+    directory.mkdir()
+    existing = directory / 'renamed [already].opus'
+    existing.write_bytes(b'preserved audio')
+    downloader = FakeDownloader()
+    events = []
+    result = SpotifyLibrary(auth).sync_collection(
+        CollectionKey('me', 'saved'), downloader, download_path=tmp_path,
+        event_callback=events.append, operation_id='existing')
+    assert result.skipped_count == 1 and result.success_count == 0
+    assert downloader.calls == []
+    skipped = next(event for event in events if event.phase == 'skip' and event.track_id == 'already')
+    assert skipped.final_path == str(existing)
+    assert existing.read_bytes() == b'preserved audio'
+    assert events[-1].phase == 'success'
+
+
+def test_scoped_sync_does_not_implicitly_repair_nested_files(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_saved_tracks.return_value = page([{'track': track('nested')}])
+    directory = tmp_path / 'my_songs'
+    nested = directory / 'legacy-folder'
+    nested.mkdir(parents=True)
+    original = nested / 'renamed [nested].mp3'
+    original.write_bytes(b'preserved nested original')
+    downloader = FakeDownloader()
+    result = SpotifyLibrary(auth).sync_collection(
+        CollectionKey('me', 'saved'), downloader, download_path=tmp_path)
+    assert result.success_count == 1
+    assert original.read_bytes() == b'preserved nested original'
+    assert (directory / 'Artist - nested [nested].mp3').is_file()
+
+
+def test_scoped_sync_cancellation_emits_terminal_event_without_mutation(auth, tmp_path):
+    from model.library_state import CollectionKey
+    downloader = FakeDownloader()
+    downloader.cancelled = True
+    events = []
+    result = SpotifyLibrary(auth).sync_collection(
+        CollectionKey('me', 'saved'), downloader, download_path=tmp_path,
+        event_callback=events.append, operation_id='cancelled')
+    assert result.cancelled and result.failure_count == 0
+    assert [event.phase for event in events] == ['syncing', 'cancelled']
+    assert not tmp_path.joinpath('my_songs').exists()
+
+
+def test_scoped_sync_ignores_progress_callback_exception(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_saved_tracks.return_value = page([{'track': track('one')}])
+    downloader = FakeDownloader()
+    def broken_progress(*args):
+        raise RuntimeError('progress consumer closed')
+    result = SpotifyLibrary(auth).sync_collection(
+        CollectionKey('me', 'saved'), downloader, download_path=tmp_path,
+        progress_callback=broken_progress, operation_id='progress-error')
+    assert result.success_count == 1 and result.failure_count == 0
+    assert len(downloader.calls) == 1
+    assert (tmp_path / 'my_songs' / 'Artist - one [one].mp3').is_file()
+
+
+def test_scoped_sync_reclassifies_unverified_downloader_success(auth, tmp_path):
+    from model.library_state import CollectionKey
+    auth.current_user_saved_tracks.return_value = page([{'track': track('phantom')}])
+    class PhantomDownloader(FakeDownloader):
+        def download(self, songs, directory, progress_callback=None, track_callback=None):
+            result = SyncResult(success_count=len(songs))
+            for song in songs:
+                track_callback(song, 'downloading', None, None)
+                track_callback(song, 'success', None, None)
+            return result
+    events = []
+    result = SpotifyLibrary(auth).sync_collection(
+        CollectionKey('me', 'saved'), PhantomDownloader(), download_path=tmp_path,
+        event_callback=events.append, operation_id='phantom')
+    assert (result.success_count, result.failure_count, result.total) == (0, 1, 1)
+    assert [event.phase for event in events if event.track_id == 'phantom'] == [
+        'downloading', 'failure']
+    assert events[-1].phase == 'failure'

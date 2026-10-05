@@ -44,6 +44,15 @@ class SyncResult:
         with self._lock:
             self.skipped_count += count
 
+    def reclassify_success_as_failure(self, item_name: str, item_url: Optional[str],
+                                     error_message: str):
+        """Correct a success report when its verified output is missing."""
+        with self._lock:
+            if self.success_count:
+                self.success_count -= 1
+            self.failure_count += 1
+            self.errors.append(DownloadError(item_name, item_url, error_message))
+
     def add_note(self, message: str):
         with self._lock:
             self.notes.append(message)
