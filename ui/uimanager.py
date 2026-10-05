@@ -79,13 +79,19 @@ class SyncWorker(QThread):
     result_ready = pyqtSignal(object)
     failed = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
+    event_ready = pyqtSignal(object)
     log_line = pyqtSignal(str)
 
-    def __init__(self, selected_user, kind, downloader=None):
+    def __init__(self, selected_user, kind, downloader=None, collection_key=None,
+                 track_ids=None, operation_id=None, download_path=None):
         super().__init__()
         self.selected_user = selected_user
         self.kind = kind
         self._downloader = downloader
+        self.collection_key = collection_key
+        self.track_ids = tuple(track_ids) if track_ids is not None else None
+        self.operation_id = operation_id
+        self.download_path = download_path
         self._cancelled = threading.Event()
         if downloader:
             downloader.log_callback = self.log_line.emit
@@ -99,8 +105,17 @@ class SyncWorker(QThread):
         try:
             library = self.selected_user.library
             if self.kind == 'repair':
-                result = library.repair_library(progress_callback=self.progress.emit,
-                                                cancel_check=self._cancelled.is_set)
+                repair_args = {'progress_callback': self.progress.emit,
+                               'cancel_check': self._cancelled.is_set}
+                if self.download_path is not None:
+                    repair_args['download_path'] = self.download_path
+                result = library.repair_library(**repair_args)
+            elif self.kind == 'collection':
+                result = library.sync_collection(
+                    self.collection_key, downloader=self._downloader,
+                    download_path=self.download_path, track_ids=self.track_ids,
+                    operation_id=self.operation_id, progress_callback=self.progress.emit,
+                    event_callback=self.event_ready.emit)
             elif self.kind in ('songs', 'playlists'):
                 result = getattr(library, 'sync_' + self.kind)(
                     downloader=self._downloader, progress_callback=self.progress.emit)
@@ -118,9 +133,10 @@ class SyncWindow(QWidget):
     operation_started = pyqtSignal()
     operation_finished = pyqtSignal()
 
-    def __init__(self, selected_user):
+    def __init__(self, selected_user, operation_guard=None):
         super().__init__()
         self.selected_user = selected_user
+        self.operation_guard = operation_guard
         self.options_window = None
         self.sync_thread = None
         self.setWindowTitle('Synchronization')
@@ -159,6 +175,10 @@ class SyncWindow(QWidget):
 
     def _begin(self, kind):
         if self.sync_thread and self.sync_thread.isRunning():
+            return
+        if self.operation_guard and not self.operation_guard():
+            QMessageBox.warning(self, 'Library busy',
+                                'Finish or cancel browser work and stop local playback before starting batch sync or repair.')
             return
         try:
             downloader = None
