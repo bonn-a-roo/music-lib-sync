@@ -1,9 +1,9 @@
 # ADR-0002 — Cross-format local playback decoding
 
-- Date: 2026-10-05
-- Status: Accepted implementation choice; interactive desktop/audio-output verification remains pending.
+- Date: 2026-10-05 (amended 2026-10-14: MP3 timing)
+- Status: Accepted implementation choice; Computer Use passes and live playback of library files done; high-DPI/screen-reader checks remain pending.
 - Related: Refines the playback recommendation in [ADR-0001](adr-0001-media-library-ui.md) without changing its local-only playback requirement.
-- Implementation: `ui/playback.py` supplies persistent controls/queue through QtMultimedia and uses asynchronous FFmpeg-to-WAV fallback for Qt codec gaps. Generated temporary-audio tests exercise all six supported formats. Final Computer Use validation is pending.
+- Implementation: `ui/playback.py` supplies persistent controls/queue through QtMultimedia and uses asynchronous FFmpeg-to-WAV fallback for Qt codec gaps and MP3 timing. Generated temporary-audio tests exercise all six supported formats.
 
 ## Context
 
@@ -26,3 +26,19 @@ Playback must use existing local files only, never trigger downloads or Spotify 
 - Unsupported-by-Qt formats incur full-file decode latency and temporary disk usage. Very long/large sources may exceed the explicit cap; this is reported rather than consuming unbounded scratch space.
 - Qt codec support may differ on other Windows installations; the FFmpeg fallback is part of the supported path, not a reason to claim Qt natively decodes every format.
 - Format tests use generated temporary audio. Manual audible output, window lifecycle, keyboard/high-DPI layout, and fallback interaction still require Computer Use on the target desktop.
+
+## Amendment — 2026-10-14: decode MP3 as well
+
+**Status: implemented.**
+
+Live playback of real library files showed that Qt 5.15's default Windows backend (DirectShow) mis-times MP3s even though it decodes them: it ignores the Xing header of VBR files (a 7:04 track reported 27:48; a generated 60 s VBR file reported 128 s) and counts ID3 tag bytes, such as embedded artwork, as audio (a 169.8 s CBR file with a 95 KB tag reported 175.8 s). Seek targets use the same wrong mapping, so seeking lands on the wrong audio. About 83 % of the user's MP3s are VBR, and downloads/repair embed artwork, so nearly every MP3 is affected.
+
+Decision: decode MP3 to the temporary WAV before playback, like FLAC/M4A/Opus/Ogg. Only WAV plays natively. If the WAV would exceed the temporary-file cap (about 100 minutes of audio), or the MP3 header is unreadable, the MP3 is played natively instead (approximate timing is better than refusing a long mix; Qt's own error still triggers the one-shot fallback). Measured cost on library files: playback starts after 0.25–0.4 s; a 4:22 track needs 44 MiB of scratch space.
+
+Alternatives evaluated and rejected:
+
+- **Media Foundation backend** (`QT_MULTIMEDIA_PREFERRED_PLUGINS=windowsmediafoundation`): correct VBR timing and native FLAC/M4A, but it keeps a URL source open after the media is cleared (still locked after 8 s and after deleting the player), which breaks the guarantee that Repair can move a file once playback is quiesced. Feeding it a `QFile` we close ourselves released the file but caused an access violation in the UI suite (the backend keeps a raw pointer to the stream), and the same stream path hung under DirectShow.
+- **Correcting the displayed duration only**: does not fix seeking, which uses the same wrong byte mapping.
+- **Decoding VBR only**: CBR files with artwork are also mis-timed.
+
+Side effect: Qt never holds an MP3 library file open during playback (FFmpeg reads it only while decoding), so repair/flattening no longer waits on Qt for MP3s.

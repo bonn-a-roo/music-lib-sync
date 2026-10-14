@@ -62,12 +62,83 @@ def test_local_playback_handles_all_supported_formats(tmp_path, extension):
         assert not errors, f'{extension} playback failed: {errors}'
         assert player.player.duration() > 0
         assert player.player.state() == player.player.PlayingState
-        if extension in ('flac', 'm4a', 'opus', 'ogg'):
+        if extension in ('mp3', 'flac', 'm4a', 'opus', 'ogg'):
             assert player._current_temp and Path(player._current_temp).suffix == '.wav'
             assert Path(player._current_temp).is_file()
         else:
             assert player._current_temp is None
         assert path.is_file()
+    finally:
+        player.close()
+        app.processEvents()
+
+
+def test_mp3_is_decoded_before_playback_unless_the_wav_would_be_too_large(tmp_path, monkeypatch):
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        pytest.skip('FFmpeg is required for temporary playback fixtures')
+    paths = {}
+    for name, options in (('cbr', ['-b:a', '128k']), ('vbr', ['-q:a', '2'])):
+        paths[name] = tmp_path / f'{name}.mp3'
+        subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+                        '-i', 'sine=frequency=440:duration=2', '-c:a', 'libmp3lame', *options,
+                        str(paths[name])], check=True, capture_output=True, timeout=30)
+    garbage = tmp_path / 'garbage.mp3'
+    garbage.write_bytes(b'not audio' * 100)
+    # DirectShow mis-times VBR and artwork-tagged CBR MP3s alike, so both decode.
+    assert PlaybackController._decode_first(str(paths['cbr']))
+    assert PlaybackController._decode_first(str(paths['vbr']))
+    assert not PlaybackController._decode_first(str(garbage))  # Qt's error triggers the fallback
+    assert not PlaybackController._decode_first(str(tmp_path / 'missing.mp3'))
+    assert not PlaybackController._decode_first(str(tmp_path / 'tone.wav'))
+    assert PlaybackController._decode_first(str(tmp_path / 'tone.FLAC'))
+    # A 2 s MP3 needs about 350 KB of WAV; over the cap it plays natively instead of failing.
+    monkeypatch.setattr(PlaybackController, 'MAX_TEMP_WAV_BYTES', 100_000)
+    assert not PlaybackController._decode_first(str(paths['cbr']))
+
+
+def test_vbr_mp3_reports_real_duration_seeks_accurately_and_releases_file(tmp_path):
+    # Live finding: Qt's Windows DirectShow backend estimated VBR MP3 length from the
+    # first frames (a 7:04 track showed 27:48) and seeked to the wrong audio, so MP3s
+    # are decoded to a temporary WAV like the formats Qt cannot play.
+    from mutagen.mp3 import MP3
+
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        pytest.skip('FFmpeg is required for temporary playback fixtures')
+    path = tmp_path / 'vbr.mp3'
+    # A silent intro makes the first VBR frames tiny, which is what misleads DirectShow.
+    subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo:d=4',
+                    '-f', 'lavfi', '-i', 'anoisesrc=d=16:c=pink:r=44100:a=0.5',
+                    '-filter_complex', '[1:a]aformat=channel_layouts=stereo[n];[0:a][n]concat=n=2:v=0:a=1',
+                    '-c:a', 'libmp3lame', '-q:a', '0', str(path)],
+                   check=True, capture_output=True, timeout=30)
+    real_ms = MP3(str(path)).info.length * 1000
+    player = PlaybackController(ffmpeg_path=ffmpeg)
+    player.set_volume(0)
+    errors = []
+    player.error_occurred.connect(errors.append)
+    player.play_queue([PlaybackEntry(CollectionKey('account', 'saved'), 'vbr123', str(path),
+                                    'VBR', 'Artist', 0)])
+    _wait_for_decode(player)
+    try:
+        assert not errors
+        assert player._current_temp and Path(player._current_temp).suffix == '.wav'
+        assert abs(player.duration - real_ms) < 1000, (player.duration, real_ms)
+        player.seek(int(real_ms) - 1500)
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline and player.current_entry is not None:
+            app.processEvents()
+            time.sleep(.01)
+        assert player.current_entry is None, 'seeking near the end did not reach the end of the track'
+        player.quiesce()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not player.is_quiesced:
+            app.processEvents()
+            time.sleep(.01)
+        assert player.is_quiesced
+        path.rename(tmp_path / 'moved.mp3')  # Repair can move the file once playback releases it
     finally:
         player.close()
         app.processEvents()

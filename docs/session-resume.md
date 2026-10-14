@@ -4,7 +4,7 @@ Short entrypoint for resuming development. Details belong in the [spec](spec.md)
 
 ## State — 2026-10-14
 
-Full offline suite: **239 passed**. Live verification against the user's real Spotify account and yt-dlp was run on 2026-10-14 (results below); everything else in this handoff comes from offline tests and Computer Use passes over generated audio.
+Full offline suite: **241 passed**. Live verification against the user's real Spotify account and yt-dlp was run on 2026-10-14 (results below); everything else in this handoff comes from offline tests and Computer Use passes over generated audio.
 
 ### Live verification — 2026-10-14
 
@@ -12,8 +12,8 @@ Run with Computer Use against a throwaway destination in `%TEMP%` seeded with *c
 
 - Passed: cached-token authentication (no browser), full browse (153 collections in about 90 s: Saved tracks 3539/3662 Partial, 109 playlists never synced, 40 Restricted, 3 Empty), Options destination change and rescan, **Sync missing** on a 2-track playlist (verified durations within 0.05 s of Spotify, tags and artwork), confirmed **Repair Library** (flattened nested folders, quarantined a truncated and a garbage file shown as Quarantined, tagged untagged files with byte-identical audio, left unknown IDs, `.part` leftovers and playlists untouched), Spotify 429 responses recovered by the bounded retries, playback and pause.
 - Fixed: closing the app with paused playback left an empty main window and a live process (the deferred close only closed the embedded browser).
-- Open: QtMultimedia on Windows reports VBR MP3 durations 3.6–4× too long (e.g. 27:48 for a 7:04 track), so the position label and seek range are wrong; files carry correct Xing headers and mutagen/ffprobe read them correctly. Affects new downloads and existing library files.
-- Observations: several files in the user's library have no tags (Repair would add them); `test/my_songs` still contains nested folders and `.part`/`.ytdl` leftovers; the legacy `audio_bitrate` key in `config.ini` is unused (downloads use VBR quality 0, about 228 kbps average); every mutation ends with a full library rescan (about 90 s).
+- Fixed afterwards: Qt's Windows DirectShow backend mis-timed MP3s (VBR Xing header ignored: 7:04 shown as 27:48; ID3/artwork bytes counted as audio: CBR files seconds off), breaking the position label and seeking. MP3s now play through the temporary WAV ([ADR-0002](adr/adr-0002-local-playback-decoding.md) amendment, which also records why Media Foundation was rejected). Verified headless on real library files: exact durations, accurate mid/end seeks, start in 0.25–0.4 s. Not yet re-checked in the GUI.
+- Observations: 361 of 3557 MP3s in `test/my_songs` last about 30 s (likely previews from old backends; Repair Library would quarantine them so Sync can replace them; decide with the user before running it on the real library); several files in the user's library have no tags (Repair would add them); `test/my_songs` still contains nested folders and `.part`/`.ytdl` leftovers; the legacy `audio_bitrate` key in `config.ini` is unused (downloads use VBR quality 0, about 228 kbps average); every mutation ends with a full library rescan (about 90 s).
 - Not yet run live: Sync or Repair against the user's real library, Sync all, cancellation of a real download.
 
 Implemented and covered by offline tests plus Computer Use passes over generated audio:
@@ -27,7 +27,7 @@ Known limits (documented, not bugs to fix blindly): presence is not validity, so
 ## Next development session
 
 1. Read [../CLAUDE.md](../CLAUDE.md) and the guidance for the affected area; run `python -m pytest` first to confirm the baseline.
-2. **Fix the VBR MP3 playback duration** reported by Qt (see Live verification), then decide whether live verification is sufficient or should also cover Sync all and cancelling a real download.
+2. **Quick GUI check of MP3 playback** (duration label, slider seek), then decide whether live verification should also cover Sync all, cancelling a real download and Repair on the real library (see the 30 s previews above).
 3. **Remaining desktop checks**: high-DPI/scaled displays (ask the user to change Windows scaling; Computer Use cannot), a Tab-order and screen-reader audit, and real window resizing.
 4. **Decide the cutover** (ADR-0001 phase 5): the core live checks passed on 2026-10-14; retire the legacy batch window once the user agrees, then update spec, runbook and ADR status.
 5. Candidate follow-ups, none started: validate audio on playback/repair so damaged files stop reading as Synced; per-row repair outcomes (needs a new event vocabulary, see the ADR-0001 event notes); selected-collection repair; genre enrichment and an Add account flow stay in the backlog.

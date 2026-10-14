@@ -19,6 +19,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Offline regressions for authentication, GUI worker failures, retries, safe filenames, repairs, tagging and subprocess shutdown.
 
 ### Fixed
+- MP3 playback showed wrong durations and seeked to the wrong audio (a 7:04 VBR track showed 27:48; artwork-tagged CBR files were seconds off) because Qt's Windows backend ignores the Xing header and counts tag bytes as audio. MP3s now play through the temporary-WAV path; MP3s too long for its cap still play natively.
 - Closing the app while playback was paused or decoding left an empty main window and a running process: the deferred close after player release closed only the embedded library browser, not its top-level window.
 - Scoped sync preserves verified output across duplicate-job cancellation, isolates progress callback errors, reclassifies unverified success results and emits terminal cancellation even when cleanup fails.
 - Browser repair/sync cannot race an already-open batch window; repair confirmation is rechecked after modal events and failed final queued jobs trigger a deferred reconciliation.

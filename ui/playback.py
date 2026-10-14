@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import uuid
 
+from mutagen.mp3 import MP3
 from PyQt5.QtCore import QObject, QProcess, QTimer, QUrl, pyqtSignal
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 
@@ -14,6 +15,21 @@ from model.library_state import CollectionKey
 from utils.logutils import get_logger
 
 logger = get_logger(__name__)
+
+
+_WAV_BYTES_PER_SECOND = 44100 * 2 * 2  # FFmpeg fallback output: 44.1 kHz, 16-bit stereo
+
+
+def _mp3_wav_fits(path, limit):
+    """Return True when an MP3's temporary WAV would stay below ``limit``.
+
+    Unreadable headers return False so Qt tries the file and its own error
+    triggers the normal FFmpeg fallback.
+    """
+    try:
+        return MP3(path).info.length * _WAV_BYTES_PER_SECOND < limit
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -249,7 +265,7 @@ class PlaybackController(QObject):
             return
         entry = self._queue[self._index]
         self._current_entry = entry
-        self._fallback_attempted = Path(entry.path).suffix.casefold() in self._TRANSCODE_FIRST
+        self._fallback_attempted = self._decode_first(entry.path)
         self._fallback_position_ms = 0
         self._resume_after_decode = True
         self.current_changed.emit(entry)
@@ -263,6 +279,22 @@ class PlaybackController(QObject):
             self.state_changed.emit('loading')
             return
         self._load_current_source()
+
+    @classmethod
+    def _decode_first(cls, path):
+        """Decide whether to decode to a temporary WAV before playing.
+
+        Qt's Windows DirectShow backend mis-times MP3s: it ignores the Xing
+        header of VBR files (a 7:04 track reported 27:48) and counts ID3 tag
+        bytes such as embedded artwork as audio, so duration and seek targets
+        are wrong. MP3s are therefore decoded too, unless the WAV would exceed
+        the temporary-file cap; such long files still play natively with
+        approximate timing rather than failing.
+        """
+        suffix = Path(path).suffix.casefold()
+        if suffix in cls._TRANSCODE_FIRST:
+            return True
+        return suffix == '.mp3' and _mp3_wav_fits(path, cls.MAX_TEMP_WAV_BYTES)
 
     def _load_current_source(self):
         if self._current_entry is None or self._closed or self._quiescing:
