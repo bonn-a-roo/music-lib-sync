@@ -19,6 +19,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Offline regressions for authentication, GUI worker failures, retries, safe filenames, repairs, tagging and subprocess shutdown.
 
 ### Fixed
+- Closing the app while playback was paused or decoding left an empty main window and a running process: the deferred close after player release closed only the embedded library browser, not its top-level window.
 - Scoped sync preserves verified output across duplicate-job cancellation, isolates progress callback errors, reclassifies unverified success results and emits terminal cancellation even when cleanup fails.
 - Browser repair/sync cannot race an already-open batch window; repair confirmation is rechecked after modal events and failed final queued jobs trigger a deferred reconciliation.
 - Playback stops/awaits Qt media and FFmpeg process release before repair, batch mutation or safe window close.

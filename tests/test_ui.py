@@ -697,6 +697,44 @@ def test_browser_close_waits_for_native_playback_release(environment, monkeypatc
     assert not window.isVisible()
 
 
+def test_embedded_browser_close_after_playback_release_closes_main_window(environment, monkeypatch, tmp_path):
+    import wave
+    from ui.library_browser import LibraryBrowser
+    from model.library_state import CollectionKey, CollectionSnapshot, TrackSnapshot
+
+    key = CollectionKey('account', 'saved')
+    destination = tmp_path / 'my_songs'
+    destination.mkdir()
+    path = destination / 'Song [one123].wav'
+    with wave.open(str(path), 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(bytes(8000 * 2 * 10))
+    snapshot = CollectionSnapshot(key, 'Saved tracks', str(destination), tracks=(
+        TrackSnapshot('one123', 'Song', 'Artist', None, 10000, 'downloaded', str(path)),
+    ), scan_complete=True)
+    library = SimpleNamespace(browse_collections=lambda *args, **kwargs: iter([snapshot]))
+    monkeypatch.setattr(ui.configutils, 'get_download_path', lambda: str(tmp_path))
+    user = SimpleNamespace(library=library, get_name=lambda: 'Account', get_id=lambda: 'account')
+    manager = SimpleNamespace(get_users=lambda: [user], get_selected_user=lambda: user,
+                              set_session_id=lambda value: None)
+    monkeypatch.setattr(ui, 'SessionManager', lambda: manager)
+    main = ui.MainWindow()
+    main.show()
+    main.open_library_window()
+    browser = main.centralWidget()
+    assert isinstance(browser, LibraryBrowser)
+    pump_until(lambda: browser.worker is not None and not browser.worker.isRunning())
+    browser._play_table_index(browser.proxy.index(0, 0))
+    assert browser.playback.current_entry is not None
+    # Live finding: the deferred close closed only the embedded widget and left an
+    # empty top-level window (and the process) alive.
+    main.close()
+    pump_until(lambda: browser.playback._closed)
+    pump_until(lambda: not main.isVisible())
+
+
 def test_browser_repair_library_is_queued_confirmed_and_uses_captured_root(
         environment, monkeypatch, tmp_path):
     from dataclasses import replace

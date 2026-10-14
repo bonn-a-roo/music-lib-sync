@@ -1391,7 +1391,9 @@ class LibraryBrowser(QWidget):
             self.playback.quiesced.disconnect(self._finish_close_after_player_quiesced)
         except (TypeError, RuntimeError):
             pass
-        QTimer.singleShot(0, self.close)
+        # When embedded as MainWindow's central widget, closing only this widget
+        # would leave an empty top-level window and the process running.
+        QTimer.singleShot(0, self.window().close)
 
     def closeEvent(self, event):
         if self.sync_window and not self.sync_window.close():
