@@ -2,9 +2,19 @@
 
 Short entrypoint for resuming development. Details belong in the [spec](spec.md), [runbook](runbook.md), [backlog](backlog.md), [ADR index](adr/README.md) and [area guidance](agents/README.md).
 
-## State — 2026-10-05
+## State — 2026-10-14
 
-`main` is published at the commit "Document scoped sync, queued repair and local playback (ADR-0002)"; the working tree was clean. Full offline suite: **238 passed**. Nothing in this handoff has been verified against live Spotify or yt-dlp.
+Full offline suite: **239 passed**. Live verification against the user's real Spotify account and yt-dlp was run on 2026-10-14 (results below); everything else in this handoff comes from offline tests and Computer Use passes over generated audio.
+
+### Live verification — 2026-10-14
+
+Run with Computer Use against a throwaway destination in `%TEMP%` seeded with *copies* of library files; `test/` was never written and `config.ini` was restored afterwards.
+
+- Passed: cached-token authentication (no browser), full browse (153 collections in about 90 s: Saved tracks 3539/3662 Partial, 109 playlists never synced, 40 Restricted, 3 Empty), Options destination change and rescan, **Sync missing** on a 2-track playlist (verified durations within 0.05 s of Spotify, tags and artwork), confirmed **Repair Library** (flattened nested folders, quarantined a truncated and a garbage file shown as Quarantined, tagged untagged files with byte-identical audio, left unknown IDs, `.part` leftovers and playlists untouched), Spotify 429 responses recovered by the bounded retries, playback and pause.
+- Fixed: closing the app with paused playback left an empty main window and a live process (the deferred close only closed the embedded browser).
+- Open: QtMultimedia on Windows reports VBR MP3 durations 3.6–4× too long (e.g. 27:48 for a 7:04 track), so the position label and seek range are wrong; files carry correct Xing headers and mutagen/ffprobe read them correctly. Affects new downloads and existing library files.
+- Observations: several files in the user's library have no tags (Repair would add them); `test/my_songs` still contains nested folders and `.part`/`.ytdl` leftovers; the legacy `audio_bitrate` key in `config.ini` is unused (downloads use VBR quality 0, about 228 kbps average); every mutation ends with a full library rescan (about 90 s).
+- Not yet run live: Sync or Repair against the user's real library, Sync all, cancellation of a real download.
 
 Implemented and covered by offline tests plus Computer Use passes over generated audio:
 
@@ -17,11 +27,10 @@ Known limits (documented, not bugs to fix blindly): presence is not validity, so
 ## Next development session
 
 1. Read [../CLAUDE.md](../CLAUDE.md) and the guidance for the affected area; run `python -m pytest` first to confirm the baseline.
-2. **Verify live behavior** (needs the user's credentials, Node.js, FFmpeg and a Firefox/cookies profile): authenticate, browse real collections, Sync missing on a small playlist, Repair on a throwaway directory. Report live results separately from offline ones.
+2. **Fix the VBR MP3 playback duration** reported by Qt (see Live verification), then decide whether live verification is sufficient or should also cover Sync all and cancelling a real download.
 3. **Remaining desktop checks**: high-DPI/scaled displays (ask the user to change Windows scaling; Computer Use cannot), a Tab-order and screen-reader audit, and real window resizing.
-4. **Decide the cutover** (ADR-0001 phase 5): retire the legacy batch window only after step 2 passes; then update spec, runbook and ADR status.
+4. **Decide the cutover** (ADR-0001 phase 5): the core live checks passed on 2026-10-14; retire the legacy batch window once the user agrees, then update spec, runbook and ADR status.
 5. Candidate follow-ups, none started: validate audio on playback/repair so damaged files stop reading as Synced; per-row repair outcomes (needs a new event vocabulary, see the ADR-0001 event notes); selected-collection repair; genre enrichment and an Add account flow stay in the backlog.
-6. Small cleanup: `tests/conftest.py` creates a new `mls-test-logs-*` directory in `%TEMP%` on every run and never removes it; older `mls-*` temp directories from earlier sessions can be deleted.
 
 ## Computer Use recipe (what worked, what bit us)
 

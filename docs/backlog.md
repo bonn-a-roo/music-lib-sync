@@ -13,7 +13,9 @@ Design and acceptance criteria: [ADR-0001](adr/adr-0001-media-library-ui.md). Th
 - [x] Add browser Sync all for accessible collections and confirmed whole-library Repair Library through the serialized job queue; retain batch paths during validation.
 - [x] Add persistent local-file playback controls and a verified Qt/FFmpeg fallback path for the six supported formats using generated temporary audio.
 - [x] Computer Use verification of audible output, player controls, queue/navigation, cancellation/repair file release and narrow-window rendering with generated audio.
-- [ ] Verify high-DPI scaling, Tab order/screen readers and live Spotify/yt-dlp runs; then complete the end-to-end cutover and retire obsolete batch UI paths.
+- [x] Live Spotify/yt-dlp verification of authentication, browsing, Sync missing and Repair Library on a throwaway destination (2026-10-14).
+- [ ] Fix VBR MP3 playback duration: QtMultimedia on Windows reports 3.6–4× the real length, breaking the position label and seek range.
+- [ ] Verify high-DPI scaling and Tab order/screen readers; then complete the end-to-end cutover and retire obsolete batch UI paths.
 
 Coverage and activity are separate: a partially downloaded playlist may be idle or downloading. Synced requires a complete successfully reconciled snapshot. Restricted or failed Spotify listings must not appear synced. Preserve existing audio and quarantined originals.
 
