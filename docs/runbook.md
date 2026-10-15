@@ -1,6 +1,6 @@
 # Runbook — setup and operation
 
-Commands run from the repository root. This guide is an operating recipe, not a claim that live Spotify authorization or provider downloads were verified in the documentation session.
+Commands run from the repository root. This guide is an operating recipe. Authentication, browsing, Sync missing, Repair Library and playback were verified live on 2026-10-14 against a throwaway destination (see [session-resume.md](session-resume.md)); Sync all and cancelling real downloads have not been exercised live.
 
 ## Requirements
 
@@ -37,7 +37,8 @@ redirect_uri = http://127.0.0.1:8888/callback
 
 - `download_path`: destination root; `~` expands to your home directory.
 - `cookies_file`: optional exported cookies file. If empty, yt-dlp reads Firefox cookies.
-- `audio_format`: `mp3`, `flac`, `m4a`, `opus`, `ogg`, or `wav`. Converting a lossy source to FLAC/WAV does not restore lost quality.
+- `audio_format`: `mp3`, `flac`, `m4a`, `opus`, `ogg`, or `wav`. Converting a lossy source to FLAC/WAV does not restore lost quality. Lossy output uses the best variable quality (MP3 averages about 230 kbps).
+- Legacy keys such as `audio_providers` and `audio_bitrate` are ignored.
 
 The Options window edits these settings. Config and token-cache locations are anchored to the project directory, not the launching directory. Config writes are atomic. `config.ini`, cookies and token caches must remain untracked.
 

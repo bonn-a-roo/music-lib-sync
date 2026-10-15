@@ -2,45 +2,55 @@
 
 Short entrypoint for resuming development. Details belong in the [spec](spec.md), [runbook](runbook.md), [backlog](backlog.md), [ADR index](adr/README.md) and [area guidance](agents/README.md).
 
-## State — 2026-10-14
+## Next session — 2026-10-14
 
-Full offline suite: **241 passed**. Live verification against the user's real Spotify account and yt-dlp was run on 2026-10-14 (results below); everything else in this handoff comes from offline tests and Computer Use passes over generated audio.
+**Last completed:** MP3 playback now decodes to a temporary WAV so duration and seeking are accurate ([ADR-0002](adr/adr-0002-local-playback-decoding.md) amendment); everything is pushed to `origin/main` (`11cbc09`).
+**Next task:** confirm MP3 playback in the GUI (duration label matches the track, slider seek lands correctly, close exits the process), then agree with the user whether to Repair + Sync the real library (see "Open" below).
 
-### Live verification — 2026-10-14
+### To start
 
-Run with Computer Use against a throwaway destination in `%TEMP%` seeded with *copies* of library files; `test/` was never written and `config.ini` was restored afterwards.
+- `main` is clean and in sync with `origin/main`. Run `python -m pytest` first; the last full run was 241 passed.
+- Live runs need `config.ini` (Spotify credentials, `download_path` = the user's real library `test/`), `.spotipy_cache` (cached token still valid on 2026-10-14), `cookies.txt` (still accepted by yt-dlp), Node.js, FFmpeg and Firefox. All present on this machine; never print or commit their contents.
+- `python main.py` → **Go** opens the browser; the first full browse takes about 90 s (153 collections).
 
-- Passed: cached-token authentication (no browser), full browse (153 collections in about 90 s: Saved tracks 3539/3662 Partial, 109 playlists never synced, 40 Restricted, 3 Empty), Options destination change and rescan, **Sync missing** on a 2-track playlist (verified durations within 0.05 s of Spotify, tags and artwork), confirmed **Repair Library** (flattened nested folders, quarantined a truncated and a garbage file shown as Quarantined, tagged untagged files with byte-identical audio, left unknown IDs, `.part` leftovers and playlists untouched), Spotify 429 responses recovered by the bounded retries, playback and pause.
-- Fixed: closing the app with paused playback left an empty main window and a live process (the deferred close only closed the embedded browser).
-- Fixed afterwards: Qt's Windows DirectShow backend mis-timed MP3s (VBR Xing header ignored: 7:04 shown as 27:48; ID3/artwork bytes counted as audio: CBR files seconds off), breaking the position label and seeking. MP3s now play through the temporary WAV ([ADR-0002](adr/adr-0002-local-playback-decoding.md) amendment, which also records why Media Foundation was rejected). Verified headless on real library files: exact durations, accurate mid/end seeks, start in 0.25–0.4 s. Not yet re-checked in the GUI.
-- Observations: 361 of 3557 MP3s in `test/my_songs` last about 30 s (likely previews from old backends; Repair Library would quarantine them so Sync can replace them; decide with the user before running it on the real library); several files in the user's library have no tags (Repair would add them); `test/my_songs` still contains nested folders and `.part`/`.ytdl` leftovers; the legacy `audio_bitrate` key in `config.ini` is unused (downloads use VBR quality 0, about 228 kbps average); every mutation ends with a full library rescan (about 90 s).
-- Not yet run live: Sync or Repair against the user's real library, Sync all, cancellation of a real download.
+### Essential context
 
-Implemented and covered by offline tests plus Computer Use passes over generated audio:
+- Live verification on 2026-10-14 passed: cached-token auth, full browse, Options destination change, Sync missing on a 2-track playlist (durations within 0.05 s, tags, artwork), confirmed Repair Library (flatten, quarantine shown as Quarantined, tags added with byte-identical audio, unknown IDs and `.part` files untouched), Spotify 429s recovered by retries, playback. It ran against a throwaway `%TEMP%` destination seeded with copies; `test/` was not written.
+- Two bugs found live and fixed (see [CHANGELOG](../CHANGELOG.md)): closing with paused playback left an empty window and a live process; Qt's Windows DirectShow backend mis-timed MP3s (VBR Xing header ignored, ID3/artwork bytes counted as audio), so duration and seeking were wrong.
+- Media Foundation was evaluated for playback and rejected because it keeps files open after playback stops, which would break Repair; details in the ADR-0002 amendment. Do not switch backends without solving that.
+- spotipy prints `HTTP Error ... 429` lines to the console during large refreshes; they are retried and are noise, not failures.
+
+### Open / blockers
+
+- **About 30 s previews in the real library:** 361 of 3557 MP3s in `test/my_songs` last about 30 s. Repair Library would move them to `_rejected` (originals kept) and a later Sync would download full tracks. Needs the user's go-ahead before running on the real library.
+- Real library also has untagged files, nested folders from the old filename bug and `.part`/`.ytdl` leftovers; Saved tracks is 3539/3662 and 109 playlists were never synced.
+- Not yet run live: Sync or Repair on the real library, Sync all, cancelling a real download.
+- Desktop checks need the user: high-DPI scaling (change Windows scaling), Tab order/screen reader, real resizing.
+- ADR-0001 phase 5 cutover (retire the legacy "Sync / repair" window): core live checks have passed; waiting for the user's decision.
+- Candidate follow-ups, none started: audio validation so damaged files with valid IDs stop reading as Downloaded/Synced; per-row repair outcomes; selected-collection repair; faster post-job refresh (see [backlog](backlog.md)).
+
+### Suggested prompt
+
+> Read docs/session-resume.md. Run the tests, then launch the app and check MP3 playback in the GUI with Computer Use (I'll leave the window in front and won't type). After that, help me decide whether to run Repair Library + Sync on my real library to replace the 30 s previews.
+
+## Implemented (offline tests plus Computer Use and live passes)
 
 - Library browser: collections, search/filters, per-track coverage, **Sync missing / Download selected / Retry failed / Sync all**, confirmed whole-library **Repair Library**, **Cancel jobs**. One serialized, cancellable job queue with stable-ID row updates, captured destination roots and a rescan when the queue drains. The legacy batch window ("Sync / repair") is retained and cannot overlap browser jobs.
-- Local playback ([ADR-0002](adr/adr-0002-local-playback-decoding.md)): persistent controls and a per-collection queue on QtMultimedia. On this Windows setup Qt plays only MP3/WAV, so FLAC/M4A/Opus/Ogg use a bounded asynchronous FFmpeg-to-temporary-WAV fallback. Repair, batch work and window close wait until Qt and FFmpeg release files. Click/drag/keyboard seek, Enter/Space from the table, short actionable errors.
-- The user confirmed audible output works.
+- Local playback ([ADR-0002](adr/adr-0002-local-playback-decoding.md)): persistent controls and a per-collection queue on QtMultimedia. Only WAV plays natively; MP3/FLAC/M4A/Opus/Ogg use a bounded asynchronous FFmpeg-to-temporary-WAV path (MP3s over the cap play natively with approximate timing). Repair, batch work and window close wait until Qt and FFmpeg release files.
 
-Known limits (documented, not bugs to fix blindly): presence is not validity, so a damaged file with a valid ID counts as Downloaded and a collection can read Synced; repair reports aggregate progress and relies on a rescan for row state; scoped sync never flattens or repairs files; the layout has a minimum width of about 839 px.
-
-## Next development session
-
-1. Read [../CLAUDE.md](../CLAUDE.md) and the guidance for the affected area; run `python -m pytest` first to confirm the baseline.
-2. **Quick GUI check of MP3 playback** (duration label, slider seek), then decide whether live verification should also cover Sync all, cancelling a real download and Repair on the real library (see the 30 s previews above).
-3. **Remaining desktop checks**: high-DPI/scaled displays (ask the user to change Windows scaling; Computer Use cannot), a Tab-order and screen-reader audit, and real window resizing.
-4. **Decide the cutover** (ADR-0001 phase 5): the core live checks passed on 2026-10-14; retire the legacy batch window once the user agrees, then update spec, runbook and ADR status.
-5. Candidate follow-ups, none started: validate audio on playback/repair so damaged files stop reading as Synced; per-row repair outcomes (needs a new event vocabulary, see the ADR-0001 event notes); selected-collection repair; genre enrichment and an Add account flow stay in the backlog.
+Known limits (documented, not bugs to fix blindly): presence is not validity, so a damaged file with a valid ID counts as Downloaded and a collection can read Synced; repair reports aggregate progress and relies on a rescan for row state; scoped sync never flattens or repairs files; the layout has a minimum width of about 839 px; every queue drain triggers a full browse (about 90 s here).
 
 ## Computer Use recipe (what worked, what bit us)
 
-- Resolve the CLI with `where orca`; load the guide with `orca skills get computer-use --json`. Do not print `ORCA_*`/`PI_*` environment variables (the safety classifier blocks it).
-- Use a throwaway harness outside the repo (it was deleted; recreate it in `%TEMP%`): generate 20–30 s tones in the six formats with FFmpeg, build `CollectionSnapshot`s from the files on disk, give `SimpleNamespace(library=...)` a fake `browse_collections`, `sync_collection` (emit `WorkerEvent`s, honor `downloader.is_cancelled()`) and `repair_library` (use `utils.repair.quarantine` for a real move), patch `ui.uimanager.YoutubeDownloader` with a fake whose `preflight()` returns `[]`, and patch `ui.library_browser.configutils.get_download_path`. Never use `test/` or the user's music.
-- The provider cannot focus or resize windows. Ask the user to bring the target window to the front first, otherwise synthetic clicks land on whatever covers it (this happened once). Our clicks also pull focus, which sent a few keystrokes the user typed elsewhere into the app; ask them not to type during runs.
-- Target by `pid:<n>` plus `--window-id` from `list-windows`; get a fresh PID/window id after every relaunch. Click list items and table rows with `--x/--y` (window-local); accessibility `click` on list items did not change the selection. Use `--click-count 2` for double-click and `set-value` to clear text fields.
-- Modal dialogs (`QMessageBox`) appear in the tree after a delay; poll for `Yes`/`No` and retry, because `get-app-state` intermittently returns nothing while a modal is open. Do not match accented labels from a heredoc script on Windows (the encoding corrupts them); match with `bot.n`.
-- Screenshots may include windows behind the target; trust the accessibility tree for state and treat unrelated content as private.
-- A 20–30 s tone decodes faster than a GUI round trip, so "close during decode" is only provable with the automated test.
+- Resolve the CLI with `where orca`; load the guide with `orca skills get computer-use --json` (stdout starts with a crashpad warning line; parse from the first `{`). Do not print `ORCA_*`/`PI_*` environment variables.
+- Live runs: back up `config.ini` to `%TEMP%` (it holds secrets, so delete the backup afterwards), set a throwaway destination through **Options**, seed it with *copies* of library files, restore the backup at the end. Never let Sync/Repair target `test/` without the user's explicit agreement.
+- Offline GUI harness (recreate in `%TEMP%` when needed): generated tones in six formats, `CollectionSnapshot`s from disk, a fake `SimpleNamespace(library=...)` with `browse_collections`/`sync_collection`/`repair_library`, `ui.uimanager.YoutubeDownloader` patched with a fake whose `preflight()` returns `[]`.
+- The provider cannot focus windows; ask the user to keep the app in front and not type. `get-app-state --restore-window` restores a minimized window. Target `pid:<n>` plus `--window-id`; refresh both after every relaunch.
+- While **Options** (a separate top-level window) is open, `list-windows` shows only Options and the browser returns `windowNotFound`; close Options with a coordinate click on its title-bar X (`Escape` does nothing and `Alt+F4` is rejected as an unsupported key).
+- Click list items and table rows with window-local `--x/--y`; use accessibility indexes for buttons; `--click-count 2` to play a row; `set-value` on the search box filters rows.
+- After Sync, Repair or an Options save the browser rebrowses everything (about 90 s) and disables mutation buttons; poll for `Library ready` before the next action, or clicks are silently ignored.
+- `QMessageBox` confirmations appear in the main window's tree after a short delay; poll for `Yes`. Use `grep -a` on tree output (non-UTF-8 bytes) and match accented labels loosely (`bot.n`).
+- Git Bash rewrites `/d/...` arguments for native tools unreliably (ffprobe reported user files as missing); pass Windows paths from Python instead. Scripts that `chdir` into the repo write relative outputs there; check `git status` afterwards.
 
 ## Constraints to retain
 

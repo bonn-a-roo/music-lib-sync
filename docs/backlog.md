@@ -35,6 +35,9 @@ Add a browser dropdown for automatic cookie extraction. Firefox is the default; 
 ### Multiple account support
 `SessionManager` and the UI dropdown support multiple users, but only one account is ever created per session. Expose an "Add account" flow so users can manage several Spotify profiles.
 
+### Faster refresh after browser jobs
+Every drained job queue and every Options save rebrowses all collections (about 90 s for 153 collections on 2026-10-14) and disables mutation buttons meanwhile. Rescan only the affected collection destinations and reuse cached Spotify metadata when it is still fresh.
+
 ### Incremental sync state
 Persist a local record of which track IDs have been downloaded (with timestamp and file path) so that duplicate checks do not rely on the filesystem alone. This enables faster syncs after the library grows large and makes it possible to detect deletions on Spotify's side.
 
